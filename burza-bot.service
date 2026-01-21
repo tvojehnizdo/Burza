@@ -1,0 +1,20 @@
+[Unit]
+Description=Burza Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/Burza
+ExecStart=/usr/bin/python3 /path/to/Burza/bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/burza-bot.log
+StandardError=append:/var/log/burza-bot-error.log
+
+# Environment variables (optional, can use .env file instead)
+# Environment="BINANCE_API_KEY=your_key"
+# Environment="BINANCE_API_SECRET=your_secret"
+
+[Install]
+WantedBy=multi-user.target
