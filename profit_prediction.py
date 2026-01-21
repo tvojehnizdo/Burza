@@ -1,6 +1,6 @@
 """Profit prediction tool for trading bot."""
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 class ProfitPredictor:
@@ -217,15 +217,18 @@ class ProfitPredictor:
         print("\n\n📊 KOMBINOVANÁ STRATEGIE (Arbitráž + Market Making)")
         print("-" * 70)
         
-        combined_daily = arb_conservative['daily_profit'] + mm_conservative['daily_profit']
-        combined_monthly = arb_conservative['monthly_profit'] + mm_conservative['monthly_profit']
-        combined_yearly = arb_conservative['yearly_profit'] + mm_conservative['yearly_profit']
-        combined_monthly_roi = (combined_monthly / self.total_capital) * 100
-        combined_yearly_roi = (combined_yearly / self.total_capital) * 100
-        
-        print(f"\n   📈 Denní zisk:      ${combined_daily:.2f}")
-        print(f"   📈 Měsíční zisk:    ${combined_monthly:.2f} ({combined_monthly_roi:.1f}% ROI)")
-        print(f"   📈 Roční zisk:      ${combined_yearly:.2f} ({combined_yearly_roi:.0f}% ROI)")
+        if arb_conservative.get('feasible', False) and mm_conservative.get('feasible', False):
+            combined_daily = arb_conservative['daily_profit'] + mm_conservative['daily_profit']
+            combined_monthly = arb_conservative['monthly_profit'] + mm_conservative['monthly_profit']
+            combined_yearly = arb_conservative['yearly_profit'] + mm_conservative['yearly_profit']
+            combined_monthly_roi = (combined_monthly / self.total_capital) * 100
+            combined_yearly_roi = (combined_yearly / self.total_capital) * 100
+            
+            print(f"\n   📈 Denní zisk:      ${combined_daily:.2f}")
+            print(f"   📈 Měsíční zisk:    ${combined_monthly:.2f} ({combined_monthly_roi:.1f}% ROI)")
+            print(f"   📈 Roční zisk:      ${combined_yearly:.2f} ({combined_yearly_roi:.0f}% ROI)")
+        else:
+            print("\n   ⚠️  Kombinace není možná - zkontrolujte parametry strategie")
         
         print("\n" + "=" * 70)
         print("⚠️  DŮLEŽITÉ POZNÁMKY:")
