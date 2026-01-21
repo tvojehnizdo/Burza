@@ -111,7 +111,8 @@ if [ ! -f .env ]; then
     # Binance API
     read -p "Binance API Key (Enter pro přeskočení): " BINANCE_KEY
     if [ -n "$BINANCE_KEY" ]; then
-        read -p "Binance API Secret: " BINANCE_SECRET
+        read -s -p "Binance API Secret: " BINANCE_SECRET
+        echo ""
     fi
     
     echo ""
@@ -119,7 +120,8 @@ if [ ! -f .env ]; then
     # Kraken API  
     read -p "Kraken API Key (Enter pro přeskočení): " KRAKEN_KEY
     if [ -n "$KRAKEN_KEY" ]; then
-        read -p "Kraken API Secret: " KRAKEN_SECRET
+        read -s -p "Kraken API Secret: " KRAKEN_SECRET
+        echo ""
     fi
     
     echo ""
@@ -139,14 +141,20 @@ if [ ! -f .env ]; then
     
     # Update API keys in .env
     if [ -n "$BINANCE_KEY" ]; then
-        sed -i "s/BINANCE_API_KEY=.*/BINANCE_API_KEY=$BINANCE_KEY/" .env
-        sed -i "s/BINANCE_API_SECRET=.*/BINANCE_API_SECRET=$BINANCE_SECRET/" .env
+        # Escape special characters for sed
+        BINANCE_KEY_ESCAPED=$(printf '%s\n' "$BINANCE_KEY" | sed 's/[[\.*^$/]/\\&/g')
+        BINANCE_SECRET_ESCAPED=$(printf '%s\n' "$BINANCE_SECRET" | sed 's/[[\.*^$/]/\\&/g')
+        sed -i "s/BINANCE_API_KEY=.*/BINANCE_API_KEY=$BINANCE_KEY_ESCAPED/" .env
+        sed -i "s/BINANCE_API_SECRET=.*/BINANCE_API_SECRET=$BINANCE_SECRET_ESCAPED/" .env
         print_success "Binance API klíče nastaveny"
     fi
     
     if [ -n "$KRAKEN_KEY" ]; then
-        sed -i "s/KRAKEN_API_KEY=.*/KRAKEN_API_KEY=$KRAKEN_KEY/" .env
-        sed -i "s/KRAKEN_API_SECRET=.*/KRAKEN_API_SECRET=$KRAKEN_SECRET/" .env
+        # Escape special characters for sed
+        KRAKEN_KEY_ESCAPED=$(printf '%s\n' "$KRAKEN_KEY" | sed 's/[[\.*^$/]/\\&/g')
+        KRAKEN_SECRET_ESCAPED=$(printf '%s\n' "$KRAKEN_SECRET" | sed 's/[[\.*^$/]/\\&/g')
+        sed -i "s/KRAKEN_API_KEY=.*/KRAKEN_API_KEY=$KRAKEN_KEY_ESCAPED/" .env
+        sed -i "s/KRAKEN_API_SECRET=.*/KRAKEN_API_SECRET=$KRAKEN_SECRET_ESCAPED/" .env
         print_success "Kraken API klíče nastaveny"
     fi
 fi
@@ -216,7 +224,16 @@ read -p "Spustit rychlý dry-run test? (doporučeno) (y/n): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     print_info "Spouštím 30 sekundový dry-run test..."
-    timeout 30 python3 bot.py || true
+    # Check if timeout command exists
+    if command -v timeout &> /dev/null; then
+        timeout 30 python3 bot.py || true
+    else
+        # Fallback without timeout
+        python3 bot.py &
+        PID=$!
+        sleep 30
+        kill $PID 2>/dev/null || true
+    fi
     echo ""
     print_success "Test dokončen - zkontrolujte výstup výše"
 fi

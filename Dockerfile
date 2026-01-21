@@ -26,6 +26,10 @@ RUN chmod +x *.sh
 # Create logs directory
 RUN mkdir -p /app/logs
 
+# Redirect logs to logs directory
+RUN ln -sf /app/logs/trading_bot.log /app/trading_bot.log && \
+    ln -sf /app/logs/trading_bot_error.log /app/trading_bot_error.log
+
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 

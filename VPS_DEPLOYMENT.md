@@ -11,8 +11,14 @@ ssh your-username@your-vps-ip
 
 ### Automatické nasazení (DOPORUČENO)
 ```bash
-# 1. Stáhněte a spusťte deployment script
-curl -sSL https://raw.githubusercontent.com/tvojehnizdo/Burza/main/deploy_vps.sh | bash
+# 1. Stáhněte deployment script
+wget https://raw.githubusercontent.com/tvojehnizdo/Burza/main/deploy_vps.sh
+
+# 2. Zkontrolujte script (doporučeno)
+less deploy_vps.sh
+
+# 3. Spusťte deployment
+bash deploy_vps.sh
 
 # NEBO pokud máte git:
 git clone https://github.com/tvojehnizdo/Burza.git
