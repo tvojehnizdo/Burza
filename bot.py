@@ -4,7 +4,7 @@ import time
 from typing import Dict, List
 from config import Config
 from exchanges import BinanceExchange, KrakenExchange
-from strategies import ArbitrageStrategy, MarketMakerStrategy
+from strategies import ArbitrageStrategy, MarketMakerStrategy, ScalpingStrategy
 
 # Configure logging
 logging.basicConfig(
@@ -76,6 +76,17 @@ class TradingBot:
     
     def _initialize_strategies(self):
         """Initialize trading strategies."""
+        # Scalping strategy (highest priority for frequent small profits)
+        if Config.SCALPING_MODE:
+            self.strategies.append(
+                ScalpingStrategy(
+                    profit_target=Config.SCALPING_PROFIT_TARGET,
+                    min_trade_amount=Config.SCALPING_MIN_TRADE,
+                    max_trade_amount=Config.MAX_TRADE_AMOUNT
+                )
+            )
+            logger.info("Scalping strategy added (HIGH FREQUENCY MODE)")
+        
         # Arbitrage strategy (works with multiple exchanges)
         if len(self.exchanges) >= 2:
             self.strategies.append(
@@ -87,13 +98,14 @@ class TradingBot:
             logger.info("Arbitrage strategy added")
         
         # Market maker strategy
-        self.strategies.append(
-            MarketMakerStrategy(
-                spread_percent=0.5,
-                order_size=Config.MAX_TRADE_AMOUNT / 2
+        if not Config.SCALPING_MODE:  # Don't use market maker in scalping mode
+            self.strategies.append(
+                MarketMakerStrategy(
+                    spread_percent=0.5,
+                    order_size=Config.MAX_TRADE_AMOUNT / 2
+                )
             )
-        )
-        logger.info("Market maker strategy added")
+            logger.info("Market maker strategy added")
     
     def _execute_signal(self, signal: Dict):
         """Execute a trading signal.
@@ -108,10 +120,12 @@ class TradingBot:
         try:
             action = signal.get('action')
             
-            if action == 'arbitrage':
+            if action == 'arbitrage' or action == 'micro_arbitrage':
                 self._execute_arbitrage(signal)
             elif action == 'market_make':
                 self._execute_market_making(signal)
+            elif action == 'scalp':
+                self._execute_scalp(signal)
             else:
                 logger.warning(f"Unknown action: {action}")
                 
@@ -170,6 +184,38 @@ class TradingBot:
         sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, sell_price)
         
         logger.info(f"Market making orders placed: Buy {buy_order['id']}, Sell {sell_order['id']}")
+    
+    def _execute_scalp(self, signal: Dict):
+        """Execute scalp trade.
+        
+        Args:
+            signal: Scalp signal
+        """
+        exchange_name = signal['exchange']
+        symbol = signal['symbol']
+        amount = signal['amount']
+        buy_price = signal['buy_price']
+        target_sell_price = signal.get('target_sell_price')
+        
+        exchange = self.exchanges[exchange_name]
+        
+        # Execute market buy for immediate entry
+        logger.info(f"Scalping: Buying {amount} {symbol} at market price ~{buy_price}")
+        buy_order = exchange.create_order(symbol, 'market', 'buy', amount)
+        
+        # If buy successful, place limit sell at target
+        if buy_order and buy_order.get('status') != 'canceled':
+            if target_sell_price:
+                logger.info(f"Scalping: Placing sell limit at {target_sell_price}")
+                sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, target_sell_price)
+                logger.info(f"Scalp executed: Buy {buy_order['id']}, Sell limit {sell_order['id']}")
+            else:
+                # Immediate sell at market for quick profit
+                logger.info(f"Scalping: Immediate sell at market")
+                sell_order = exchange.create_order(symbol, 'market', 'sell', amount)
+                logger.info(f"Quick scalp: Buy {buy_order['id']}, Sell {sell_order['id']}")
+        else:
+            logger.error("Scalp buy order failed, aborting")
     
     def run(self):
         """Run the trading bot."""

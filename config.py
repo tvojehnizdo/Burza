@@ -27,6 +27,11 @@ class Config:
     MAX_POSITION_SIZE = float(os.getenv('MAX_POSITION_SIZE', '1000'))
     STOP_LOSS_PERCENT = float(os.getenv('STOP_LOSS_PERCENT', '2.0'))
     
+    # Scalping Configuration
+    SCALPING_MODE = os.getenv('SCALPING_MODE', 'false').lower() == 'true'
+    SCALPING_PROFIT_TARGET = float(os.getenv('SCALPING_PROFIT_TARGET', '0.15'))
+    SCALPING_MIN_TRADE = float(os.getenv('SCALPING_MIN_TRADE', '10'))
+    
     @classmethod
     def validate(cls):
         """Validate that required configuration is present."""
