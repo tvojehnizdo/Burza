@@ -82,6 +82,9 @@ Burza is a project repository. This file provides guidance to GitHub Copilot whe
   - `refactor:` for code refactoring
   - `test:` for adding tests
   - `chore:` for maintenance tasks
+  - `style:` for formatting changes
+  - `perf:` for performance improvements
+  - `ci:` for CI configuration changes
 - Create feature branches from main/master
 - Keep pull requests focused and small
 - Squash commits when merging to keep history clean
