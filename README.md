@@ -4,6 +4,25 @@ Automatický obchodní systém pro Binance a Kraken burzy s podporou arbitráže
 
 ## 🚀 RYCHLÉ NASAZENÍ NA VPS
 
+### ⚡ FRESH START - Zrušit vše a začít znovu (USDC)
+
+**Máte otevřené obchody a chcete začít s USDC?** Použijte reset script:
+
+```bash
+cd Burza
+./reset_and_setup.sh
+```
+
+Script provede:
+- 🔄 Zruší **VŠECHNY** otevřené obchody na Binance & Kraken
+- ⚙️ Nastaví konfiguraci pro **BTC/USDC** (funguje v CZ!)
+- 🔑 Interaktivně se zeptá na API klíče
+- 🚀 Spustí bota v agresivním režimu
+
+📖 **Reset návod**: [RESET_GUIDE.md](RESET_GUIDE.md)
+
+---
+
 ### Metoda 1: Automatický deployment (DOPORUČENO)
 ```bash
 # Připojte se na VPS
