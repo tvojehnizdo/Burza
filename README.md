@@ -54,6 +54,23 @@ CHECK_INTERVAL=10
 
 ## Použití
 
+### Predikce Zisku
+Před spuštěním bota zjistěte, kolik můžete vydělat s vaším kapitálem:
+```bash
+python profit_prediction.py [binance_USDT] [kraken_USDT]
+```
+
+Příklad pro $50 na Binance a $30 na Kraken:
+```bash
+python profit_prediction.py 50 30
+```
+
+Nástroj zobrazí:
+- Odhad denních, měsíčních a ročních zisků
+- Konzervativní i optimistické scénáře
+- ROI (návratnost investice) v procentech
+- Doporučení pro váš kapitál
+
 ### Dry Run Mode (Testování bez reálných obchodů)
 ```bash
 python bot.py
