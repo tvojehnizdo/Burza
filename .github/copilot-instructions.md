@@ -73,6 +73,26 @@ Burza is a project repository. This file provides guidance to GitHub Copilot whe
 - Keep deployment scripts in version control
 - Document deployment procedures
 
+### VPS Deployment with GitHub Actions
+- **Webhook Setup**: Configure webhooks to trigger deployments on VPS when code is pushed
+- **GitHub Actions to VPS**: Use GitHub Actions to SSH into VPS and deploy automatically
+  - Store SSH keys and credentials in GitHub Secrets
+  - Use `appleboy/ssh-action` or similar actions for remote deployment
+  - Example workflow triggers: `on: push` for automatic deployment on code push
+- **Deployment Scripts**: Create deployment scripts on VPS (e.g., `deploy.sh`) that:
+  - Pull latest code from repository
+  - Install/update dependencies
+  - Build application if needed
+  - Restart services (systemd, PM2, etc.)
+  - Run database migrations
+- **Security**: 
+  - Use SSH keys instead of passwords
+  - Restrict GitHub Actions to specific branches (e.g., only `main` or `production`)
+  - Use deployment keys with read-only access where possible
+  - Configure firewall rules on VPS
+- **Monitoring**: Set up health checks and notifications for deployment status
+- **Zero-Downtime Deployment**: Consider using techniques like blue-green deployment or rolling updates
+
 ## Version Control
 
 - Use meaningful commit messages following conventional commits format
