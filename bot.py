@@ -232,17 +232,17 @@ class TradingBot:
             logger.info(f"Scalping: Buying {amount} {symbol} at market price ~{buy_price}")
             buy_order = exchange.create_order(symbol, 'market', 'buy', amount)
             
-            # If buy successful, place limit sell at target
+            # If buy successful, immediately sell at market for continuous loop trading
             if buy_order and buy_order.get('status') != 'canceled':
                 if target_sell_price:
                     logger.info(f"Scalping: Placing sell limit at {target_sell_price}")
                     sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, target_sell_price)
                     logger.info(f"Scalp executed: Buy {buy_order['id']}, Sell limit {sell_order['id']}")
                 else:
-                    # Immediate sell at market for quick profit
-                    logger.info(f"Scalping: Immediate sell at market")
+                    # Immediate sell at market for continuous loop trading
+                    logger.info(f"🔁 Scalping LOOP: Immediate market sell for continuous trading")
                     sell_order = exchange.create_order(symbol, 'market', 'sell', amount)
-                    logger.info(f"Quick scalp: Buy {buy_order['id']}, Sell {sell_order['id']}")
+                    logger.info(f"✅ Scalp cycle complete: Buy {buy_order['id']} → Sell {sell_order['id']} | Ready for next trade")
             else:
                 logger.error("Scalp buy order failed or was canceled, aborting")
         except Exception as e:

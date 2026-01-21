@@ -99,7 +99,7 @@ class ScalpingStrategy(BaseStrategy):
                         'exchange': name,
                         'symbol': symbol,
                         'buy_price': data['ask'],
-                        'target_sell_price': data['ask'] * (1 + self.profit_target / 100),
+                        'target_sell_price': None,  # Immediate market sell for continuous trading
                         'amount': quantity,
                         'trade_amount': trade_amount,
                         'expected_profit': trade_amount * (self.profit_target / 100)
