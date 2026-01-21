@@ -19,6 +19,9 @@ class Config:
     
     # Trading Configuration
     TRADING_PAIR = os.getenv('TRADING_PAIR', 'BTC/USDT')
+    # Multi-pair trading: trade all pairs with this quote currency
+    MULTI_PAIR_MODE = os.getenv('MULTI_PAIR_MODE', 'false').lower() == 'true'
+    QUOTE_CURRENCY = os.getenv('QUOTE_CURRENCY', 'USDC')  # Base currency (USDT, USDC, EUR, etc.)
     MIN_PROFIT_THRESHOLD = float(os.getenv('MIN_PROFIT_THRESHOLD', '0.5'))
     MAX_TRADE_AMOUNT = float(os.getenv('MAX_TRADE_AMOUNT', '100'))
     CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '10'))

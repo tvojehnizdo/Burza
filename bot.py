@@ -32,6 +32,7 @@ class TradingBot:
         self.exchanges = {}
         self.strategies = []
         self.running = False
+        self.trading_pairs = []
         
         logger.info(f"Initializing trading bot (dry_run={dry_run})")
         
@@ -44,6 +45,9 @@ class TradingBot:
         
         # Initialize exchanges
         self._initialize_exchanges()
+        
+        # Initialize trading pairs
+        self._initialize_trading_pairs()
         
         # Initialize strategies
         self._initialize_strategies()
@@ -73,6 +77,30 @@ class TradingBot:
         
         if not self.exchanges:
             raise ValueError("No exchanges were initialized successfully")
+    
+    def _initialize_trading_pairs(self):
+        """Initialize trading pairs to monitor."""
+        if Config.MULTI_PAIR_MODE:
+            # Multi-pair mode: scan all pairs with the quote currency
+            logger.info(f"Multi-pair mode enabled - scanning all {Config.QUOTE_CURRENCY} pairs")
+            pairs_set = set()
+            
+            for exchange_name, exchange in self.exchanges.items():
+                try:
+                    markets = exchange.exchange.load_markets()
+                    for symbol in markets:
+                        # Filter for quote currency pairs (e.g., */USDC)
+                        if f"/{Config.QUOTE_CURRENCY}" in symbol:
+                            pairs_set.add(symbol)
+                except Exception as e:
+                    logger.error(f"Failed to load markets from {exchange_name}: {e}")
+            
+            self.trading_pairs = sorted(list(pairs_set))
+            logger.info(f"Found {len(self.trading_pairs)} {Config.QUOTE_CURRENCY} pairs: {', '.join(self.trading_pairs[:10])}{'...' if len(self.trading_pairs) > 10 else ''}")
+        else:
+            # Single pair mode: use configured trading pair
+            self.trading_pairs = [Config.TRADING_PAIR]
+            logger.info(f"Single pair mode: {Config.TRADING_PAIR}")
     
     def _initialize_strategies(self):
         """Initialize trading strategies."""
@@ -224,19 +252,21 @@ class TradingBot:
         """Run the trading bot."""
         self.running = True
         logger.info("Trading bot started")
+        logger.info(f"Monitoring {len(self.trading_pairs)} trading pair(s)")
         
         try:
             while self.running:
                 logger.info("=== Trading cycle start ===")
                 
-                # Run each strategy
-                for strategy in self.strategies:
-                    try:
-                        signal = strategy.analyze(self.exchanges, Config.TRADING_PAIR)
-                        if signal:
-                            self._execute_signal(signal)
-                    except Exception as e:
-                        logger.error(f"Error in strategy {strategy.name}: {e}")
+                # Run strategies for each trading pair
+                for symbol in self.trading_pairs:
+                    for strategy in self.strategies:
+                        try:
+                            signal = strategy.analyze(self.exchanges, symbol)
+                            if signal:
+                                self._execute_signal(signal)
+                        except Exception as e:
+                            logger.error(f"Error in strategy {strategy.name} for {symbol}: {e}")
                 
                 logger.info(f"Sleeping for {Config.CHECK_INTERVAL} seconds...")
                 time.sleep(Config.CHECK_INTERVAL)

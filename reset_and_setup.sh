@@ -108,7 +108,9 @@ MIN_PROFIT_THRESHOLD=0.1
 MAX_TRADE_AMOUNT=15
 CHECK_INTERVAL=2
 
-# USDC Trading Pair (funguje v CZ!)
+# MULTI-PAIR MODE - obchoduje VŠECHNY páry s USDC!
+MULTI_PAIR_MODE=true
+QUOTE_CURRENCY=USDC
 TRADING_PAIR=BTC/USDC
 
 # Risk Management
@@ -121,7 +123,8 @@ SCALPING_PROFIT_TARGET=0.15
 SCALPING_MIN_TRADE=10
 EOF
 
-print_success "Konfigurační soubor .env vytvořen pro USDC"
+print_success "Konfigurační soubor .env vytvořen pro MULTI-PAIR USDC trading"
+print_info "Bot bude obchodovat VŠECHNY dostupné páry s USDC!"
 
 echo ""
 echo "================================================================="
