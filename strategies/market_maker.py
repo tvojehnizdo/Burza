@@ -45,6 +45,11 @@ class MarketMakerStrategy(BaseStrategy):
             ticker = exchange.get_ticker(symbol)
             mid_price = (ticker['bid'] + ticker['ask']) / 2
             
+            # Validate mid_price is positive and above minimum threshold
+            if mid_price <= 0 or mid_price < 0.0001:
+                logger.warning(f"Invalid mid price: {mid_price}, skipping market making")
+                return None
+            
             # Calculate buy and sell prices with spread
             buy_price = mid_price * (1 - self.spread_percent / 200)
             sell_price = mid_price * (1 + self.spread_percent / 200)

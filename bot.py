@@ -134,13 +134,18 @@ class TradingBot:
         
         # Execute buy order
         logger.info(f"Buying {amount} {symbol} on {buy_exchange_name}")
-        buy_order = buy_exchange.create_order(symbol, 'market', 'buy', amount)
-        
-        # Execute sell order
-        logger.info(f"Selling {amount} {symbol} on {sell_exchange_name}")
-        sell_order = sell_exchange.create_order(symbol, 'market', 'sell', amount)
-        
-        logger.info(f"Arbitrage executed: Buy order {buy_order['id']}, Sell order {sell_order['id']}")
+        try:
+            buy_order = buy_exchange.create_order(symbol, 'market', 'buy', amount)
+            
+            # Only execute sell if buy was successful
+            if buy_order and buy_order.get('status') != 'canceled':
+                logger.info(f"Selling {amount} {symbol} on {sell_exchange_name}")
+                sell_order = sell_exchange.create_order(symbol, 'market', 'sell', amount)
+                logger.info(f"Arbitrage executed: Buy order {buy_order['id']}, Sell order {sell_order['id']}")
+            else:
+                logger.error(f"Buy order failed or was canceled, aborting arbitrage")
+        except Exception as e:
+            logger.error(f"Arbitrage execution failed: {e}")
     
     def _execute_market_making(self, signal: Dict):
         """Execute market making orders.

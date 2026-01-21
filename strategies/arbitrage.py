@@ -66,6 +66,11 @@ class ArbitrageStrategy(BaseStrategy):
             profit_percent = ((sell_price - buy_price) / buy_price) * 100
             
             if profit_percent > self.min_profit_threshold:
+                # Validate buy_price is positive and above minimum threshold
+                if buy_price <= 0 or buy_price < 0.0001:
+                    logger.warning(f"Invalid buy price: {buy_price}, skipping arbitrage")
+                    return None
+                
                 logger.info(
                     f"Arbitrage opportunity: Buy on {buy_exchange_name} at {buy_price}, "
                     f"sell on {sell_exchange_name} at {sell_price}, "

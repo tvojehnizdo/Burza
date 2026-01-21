@@ -85,13 +85,13 @@ def test_arbitrage_logic():
     
     strategy = ArbitrageStrategy(min_profit_threshold=0.5, max_trade_amount=100)
     assert strategy.name == 'Arbitrage', "Strategy name incorrect"
-    assert strategy.enabled == True, "Strategy should be enabled by default"
+    assert strategy.enabled, "Strategy should be enabled by default"
     
     # Test enable/disable
     strategy.disable()
-    assert strategy.enabled == False, "Strategy should be disabled"
+    assert not strategy.enabled, "Strategy should be disabled"
     strategy.enable()
-    assert strategy.enabled == True, "Strategy should be enabled"
+    assert strategy.enabled, "Strategy should be enabled"
     
     print("✓ Arbitrage strategy works correctly")
     return True
@@ -105,7 +105,7 @@ def test_market_maker_logic():
     
     strategy = MarketMakerStrategy(spread_percent=0.5, order_size=50)
     assert strategy.name == 'MarketMaker', "Strategy name incorrect"
-    assert strategy.enabled == True, "Strategy should be enabled by default"
+    assert strategy.enabled, "Strategy should be enabled by default"
     
     print("✓ Market maker strategy works correctly")
     return True
