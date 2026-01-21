@@ -9,6 +9,10 @@ logger = logging.getLogger(__name__)
 class ScalpingStrategy(BaseStrategy):
     """Scalping strategy for quick small profits through high-frequency trading."""
     
+    # Constants
+    SPREAD_MULTIPLIER = 2.0  # Spread must be less than profit_target * this
+    MICRO_ARBITRAGE_THRESHOLD = 0.05  # Minimum profit % for micro-arbitrage
+    
     def __init__(self, 
                  profit_target: float = 0.15,
                  min_trade_amount: float = 10,
@@ -72,15 +76,15 @@ class ScalpingStrategy(BaseStrategy):
                 spread_percent = data['spread_percent']
                 
                 # If spread is very tight, we can potentially make quick profit
-                if spread_percent > 0 and spread_percent < self.profit_target * 2:
+                if spread_percent > 0 and spread_percent < self.profit_target * self.SPREAD_MULTIPLIER:
                     mid_price = (data['bid'] + data['ask']) / 2
                     
                     # Validate price
                     if mid_price <= 0 or mid_price < 0.0001:
                         continue
                     
-                    # Calculate trade size
-                    trade_amount = min(self.max_trade_amount, self.min_trade_amount)
+                    # Calculate trade size - use min_trade_amount for quick fills
+                    trade_amount = self.min_trade_amount
                     quantity = trade_amount / mid_price
                     
                     logger.info(
@@ -116,7 +120,7 @@ class ScalpingStrategy(BaseStrategy):
                     profit_percent = ((sell_price - buy_price) / buy_price) * 100
                     
                     # Take ANY positive arbitrage for scalping
-                    if profit_percent > 0.05:  # Even 0.05% is worth it for scalping
+                    if profit_percent > self.MICRO_ARBITRAGE_THRESHOLD:
                         trade_amount = self.min_trade_amount
                         quantity = trade_amount / buy_price
                         

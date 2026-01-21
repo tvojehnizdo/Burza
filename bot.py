@@ -120,7 +120,7 @@ class TradingBot:
         try:
             action = signal.get('action')
             
-            if action == 'arbitrage' or action == 'micro_arbitrage':
+            if action in ['arbitrage', 'micro_arbitrage']:
                 self._execute_arbitrage(signal)
             elif action == 'market_make':
                 self._execute_market_making(signal)
@@ -199,23 +199,26 @@ class TradingBot:
         
         exchange = self.exchanges[exchange_name]
         
-        # Execute market buy for immediate entry
-        logger.info(f"Scalping: Buying {amount} {symbol} at market price ~{buy_price}")
-        buy_order = exchange.create_order(symbol, 'market', 'buy', amount)
-        
-        # If buy successful, place limit sell at target
-        if buy_order and buy_order.get('status') != 'canceled':
-            if target_sell_price:
-                logger.info(f"Scalping: Placing sell limit at {target_sell_price}")
-                sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, target_sell_price)
-                logger.info(f"Scalp executed: Buy {buy_order['id']}, Sell limit {sell_order['id']}")
+        try:
+            # Execute market buy for immediate entry
+            logger.info(f"Scalping: Buying {amount} {symbol} at market price ~{buy_price}")
+            buy_order = exchange.create_order(symbol, 'market', 'buy', amount)
+            
+            # If buy successful, place limit sell at target
+            if buy_order and buy_order.get('status') != 'canceled':
+                if target_sell_price:
+                    logger.info(f"Scalping: Placing sell limit at {target_sell_price}")
+                    sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, target_sell_price)
+                    logger.info(f"Scalp executed: Buy {buy_order['id']}, Sell limit {sell_order['id']}")
+                else:
+                    # Immediate sell at market for quick profit
+                    logger.info(f"Scalping: Immediate sell at market")
+                    sell_order = exchange.create_order(symbol, 'market', 'sell', amount)
+                    logger.info(f"Quick scalp: Buy {buy_order['id']}, Sell {sell_order['id']}")
             else:
-                # Immediate sell at market for quick profit
-                logger.info(f"Scalping: Immediate sell at market")
-                sell_order = exchange.create_order(symbol, 'market', 'sell', amount)
-                logger.info(f"Quick scalp: Buy {buy_order['id']}, Sell {sell_order['id']}")
-        else:
-            logger.error("Scalp buy order failed, aborting")
+                logger.error("Scalp buy order failed or was canceled, aborting")
+        except Exception as e:
+            logger.error(f"Error executing scalp trade: {e}")
     
     def run(self):
         """Run the trading bot."""
