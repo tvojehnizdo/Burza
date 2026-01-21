@@ -1,6 +1,41 @@
 # Burza - Automated Trading Bot
 
-Automatický obchodní systém pro Binance a Kraken burzy s podporou arbitráže a market makingu.
+Automatický obchodní systém pro Binance a Kraken burzy s podporou arbitráže, market makingu a high-frequency scalpingu.
+
+## 🚀 RYCHLÉ NASAZENÍ NA VPS
+
+### Metoda 1: Automatický deployment (DOPORUČENO)
+```bash
+# Připojte se na VPS
+ssh your-user@your-vps-ip
+
+# Spusťte automatický deployment
+git clone https://github.com/tvojehnizdo/Burza.git
+cd Burza
+./deploy_vps.sh
+```
+
+Script se postará o vše:
+- ✅ Instalace závislostí
+- ✅ Nastavení Python prostředí
+- ✅ Konfigurace API klíčů (interaktivně)
+- ✅ Spuštění bota (systemd nebo screen)
+
+📖 **Detailní návod**: [VPS_DEPLOYMENT.md](VPS_DEPLOYMENT.md)
+
+### Metoda 2: Docker (nejjednodušší)
+```bash
+# Na VPS s Dockerem
+git clone https://github.com/tvojehnizdo/Burza.git
+cd Burza
+cp .env.aggressive .env
+nano .env  # Vyplňte API klíče
+docker-compose up -d burza-bot
+```
+
+📖 **Docker návod**: [DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)
+
+---
 
 ## Funkce
 
