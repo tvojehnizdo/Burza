@@ -34,7 +34,18 @@ class TradingBot:
         self.running = False
         self.trading_pairs = []
         
+        # Risk Management Tracking
+        self.daily_profit_loss = 0.0  # Track P&L
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        self.consecutive_losses = 0
+        self.max_consecutive_losses = 5  # Stop after 5 losses in a row
+        self.daily_loss_limit = Config.MAX_TRADE_AMOUNT * 5  # Max loss = 5x trade amount
+        self.last_trade_price = {}  # Track entry prices for stop-loss
+        
         logger.info(f"Initializing trading bot (dry_run={dry_run})")
+        logger.info(f"🛡️  Risk Management: Max daily loss: ${self.daily_loss_limit:.2f}, Max consecutive losses: {self.max_consecutive_losses}")
         
         # Validate configuration
         errors = Config.validate()
@@ -141,8 +152,14 @@ class TradingBot:
         Args:
             signal: Trading signal from strategy
         """
+        # Risk Management Checks
+        if not self._check_risk_limits():
+            logger.warning("⛔ Risk limits exceeded, skipping trade")
+            return
+        
         if self.dry_run:
-            logger.info(f"[DRY RUN] Would execute: {signal}")
+            logger.info(f"DRY RUN: Would execute {signal}")
+            self._simulate_trade_result(signal)
             return
         
         try:
@@ -159,6 +176,51 @@ class TradingBot:
                 
         except Exception as e:
             logger.error(f"Error executing signal: {e}")
+    
+    def _check_risk_limits(self) -> bool:
+        """Check if trading is allowed based on risk management rules.
+        
+        Returns:
+            True if trading is allowed, False otherwise
+        """
+        # Check daily loss limit
+        if self.daily_profit_loss < -self.daily_loss_limit:
+            logger.error(f"🚨 DAILY LOSS LIMIT REACHED: ${self.daily_profit_loss:.2f} < -${self.daily_loss_limit:.2f}")
+            logger.error("🛑 STOPPING TRADING FOR TODAY")
+            return False
+        
+        # Check consecutive losses
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            logger.error(f"🚨 MAX CONSECUTIVE LOSSES REACHED: {self.consecutive_losses}")
+            logger.error("🛑 STOPPING TRADING - Wait for market conditions to improve")
+            return False
+        
+        return True
+    
+    def _simulate_trade_result(self, signal: Dict):
+        """Simulate trade result for dry-run mode.
+        
+        Args:
+            signal: Trading signal
+        """
+        # Simulate 60% win rate for testing
+        import random
+        is_win = random.random() < 0.6
+        
+        if is_win:
+            profit = signal.get('expected_profit', signal.get('trade_amount', 10) * 0.002)
+            self.daily_profit_loss += profit
+            self.winning_trades += 1
+            self.consecutive_losses = 0
+            logger.info(f"✅ Simulated WIN: +${profit:.2f} | Total P&L: ${self.daily_profit_loss:.2f}")
+        else:
+            loss = signal.get('trade_amount', 10) * 0.01  # 1% loss
+            self.daily_profit_loss -= loss
+            self.losing_trades += 1
+            self.consecutive_losses += 1
+            logger.warning(f"❌ Simulated LOSS: -${loss:.2f} | Consecutive: {self.consecutive_losses} | Total P&L: ${self.daily_profit_loss:.2f}")
+        
+        self.total_trades += 1
     
     def _execute_arbitrage(self, signal: Dict):
         """Execute arbitrage trade.
@@ -232,8 +294,14 @@ class TradingBot:
             logger.info(f"Scalping: Buying {amount} {symbol} at market price ~{buy_price}")
             buy_order = exchange.create_order(symbol, 'market', 'buy', amount)
             
+            # Track entry price for stop-loss
+            self.last_trade_price[symbol] = buy_order.get('average', buy_price)
+            
             # If buy successful, immediately sell at market for continuous loop trading
             if buy_order and buy_order.get('status') != 'canceled':
+                actual_buy_price = buy_order.get('average', buy_price)
+                trade_cost = amount * actual_buy_price
+                
                 if target_sell_price:
                     logger.info(f"Scalping: Placing sell limit at {target_sell_price}")
                     sell_order = exchange.create_order(symbol, 'limit', 'sell', amount, target_sell_price)
@@ -242,21 +310,47 @@ class TradingBot:
                     # Immediate sell at market for continuous loop trading
                     logger.info(f"🔁 Scalping LOOP: Immediate market sell for continuous trading")
                     sell_order = exchange.create_order(symbol, 'market', 'sell', amount)
+                    
+                    # Calculate P&L
+                    actual_sell_price = sell_order.get('average', actual_buy_price)
+                    trade_revenue = amount * actual_sell_price
+                    profit_loss = trade_revenue - trade_cost
+                    
+                    # Update tracking
+                    self.daily_profit_loss += profit_loss
+                    self.total_trades += 1
+                    
+                    if profit_loss > 0:
+                        self.winning_trades += 1
+                        self.consecutive_losses = 0
+                        logger.info(f"✅ PROFIT: ${profit_loss:.4f} | Total: ${self.daily_profit_loss:.2f} | W/L: {self.winning_trades}/{self.losing_trades}")
+                    else:
+                        self.losing_trades += 1
+                        self.consecutive_losses += 1
+                        logger.warning(f"❌ LOSS: ${profit_loss:.4f} | Consecutive: {self.consecutive_losses} | Total: ${self.daily_profit_loss:.2f}")
+                    
                     logger.info(f"✅ Scalp cycle complete: Buy {buy_order['id']} → Sell {sell_order['id']} | Ready for next trade")
             else:
                 logger.error("Scalp buy order failed or was canceled, aborting")
         except Exception as e:
             logger.error(f"Error executing scalp trade: {e}")
+            self.consecutive_losses += 1
     
     def run(self):
         """Run the trading bot."""
         self.running = True
         logger.info("Trading bot started")
         logger.info(f"Monitoring {len(self.trading_pairs)} trading pair(s)")
+        logger.info("=" * 80)
         
         try:
             while self.running:
                 logger.info("=== Trading cycle start ===")
+                
+                # Print status
+                if self.total_trades > 0:
+                    win_rate = (self.winning_trades / self.total_trades) * 100
+                    logger.info(f"📊 Session Stats: Trades: {self.total_trades} | Win Rate: {win_rate:.1f}% | P&L: ${self.daily_profit_loss:.2f}")
                 
                 # Run strategies for each trading pair
                 for symbol in self.trading_pairs:
@@ -273,10 +367,29 @@ class TradingBot:
                 
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
+            self._print_final_report()
         except Exception as e:
             logger.error(f"Bot error: {e}")
         finally:
             self.stop()
+    
+    def _print_final_report(self):
+        """Print final trading session report."""
+        logger.info("=" * 80)
+        logger.info("📈 FINAL TRADING REPORT")
+        logger.info("=" * 80)
+        logger.info(f"Total Trades: {self.total_trades}")
+        logger.info(f"Winning Trades: {self.winning_trades}")
+        logger.info(f"Losing Trades: {self.losing_trades}")
+        if self.total_trades > 0:
+            win_rate = (self.winning_trades / self.total_trades) * 100
+            logger.info(f"Win Rate: {win_rate:.1f}%")
+        logger.info(f"Total P&L: ${self.daily_profit_loss:.2f}")
+        if self.daily_profit_loss > 0:
+            logger.info("🎉 Profitable session!")
+        else:
+            logger.info("📉 Loss session - review strategy")
+        logger.info("=" * 80)
     
     def stop(self):
         """Stop the trading bot."""
