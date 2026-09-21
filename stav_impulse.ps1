@@ -245,8 +245,8 @@ $report = [ordered]@{
         paper_equity = Get-Prop $alpha "paper_equity"
         open_trades = Get-Prop $alpha "open_trades"
         closed_trades = Get-Prop $alpha "closed_trades"
-        shadow_enabled = Get-Prop (Get-Prop $alpha "shadow") "enabled" $false
-        preferred_scenario_enabled = Get-Prop (Get-Prop $alpha "preferred_scenario") "enabled" $false
+        shadow = Get-Prop $alpha "shadow"
+        preferred_scenario = Get-Prop $alpha "preferred_scenario"
     }
     kraken = [ordered]@{
         safe_to_arm = Get-Prop $krakenReadiness "safe_to_arm" $false
@@ -347,6 +347,22 @@ $lines.Add("  quotes:         $(Get-Prop (Get-Prop $fx 'feed') 'quotes')")
 $lines.Add("  avg spread:     $(Fmt (Get-Prop (Get-Prop $fx 'feed') 'avg_spread_pips') 3) pips")
 $lines.Add("  max spread:     $(Fmt (Get-Prop (Get-Prop $fx 'feed') 'max_spread_pips') 3) pips")
 $lines.Add("  state:          $(Get-Prop $fx 'paper_execution_state')")
+$lines.Add("")
+$shadow = Get-Prop $alpha "shadow"
+$scenario = Get-Prop $alpha "preferred_scenario"
+$lines.Add("SEQUENTIAL HUNTER")
+$lines.Add("  shadow enabled: $(Get-Prop $shadow 'enabled' $false)")
+$lines.Add("  shadow equity:  $(Fmt (Get-Prop $shadow 'equity'))")
+$lines.Add("  shadow open:    $(Get-Prop $shadow 'open_trades' 0)")
+$lines.Add("  shadow closed:  $(Get-Prop $shadow 'closed_trades' 0)")
+$lines.Add("  candidates:     $(Get-Prop $shadow 'candidate_count' 0)")
+$lines.Add("  cost-positive:  $(Get-Prop $shadow 'cost_positive_candidate_count' 0)")
+$lines.Add("  max open:       $(Get-Prop $shadow 'max_open')")
+$lines.Add("  futures lane:   $(Get-Prop $scenario 'enabled' $false)")
+$lines.Add("  futures equity: $(Fmt (Get-Prop $scenario 'equity'))")
+$lines.Add("  futures open:   $(Get-Prop $scenario 'open_trades' 0)")
+$lines.Add("  futures closed: $(Get-Prop $scenario 'closed_trades' 0)")
+$lines.Add("  futures edge+:  $(Get-Prop $scenario 'cost_positive_candidate_count' 0)")
 $lines.Add("")
 $lines.Add("RELATIVE VALUE V2")
 $lines.Add("  running:        $rvRunning")
