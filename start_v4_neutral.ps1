@@ -23,6 +23,7 @@ $env:AUTO_RECORD = "1"
 $env:START_CAPITAL = "5000"
 $env:WS_SYMBOLS = "BTC/USD,ETH/USD,SOL/USD,XRP/USD,DOGE/USD,ADA/USD,LINK/USD,LTC/USD,BCH/USD,AVAX/USD,DOT/USD,XLM/USD"
 $env:MICRO_SNAPSHOT_MS = "1000"
+$env:DATA_DB = "data/pulse_hunter_v1.db"
 
 # Sequential opportunity hunter: one position at a time across a wider universe.
 $env:ALPHA_INTERVAL_S = "2"
@@ -87,6 +88,7 @@ Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" 
 Write-Host "Entry: robust basis deviation >= 1.5 sigma after >=60 quality observations; min net edge 5 bps" -ForegroundColor Green
 Write-Host "History: 30 s decimation; pair spread quality cap 15 bps" -ForegroundColor Green
 Write-Host "Sequential SHADOW hunter: ON | 12 spot pairs | max 1 trade | 100% simulated allocation" -ForegroundColor Green
+Write-Host "Hunter ledger: data/pulse_hunter_v1.db (isolated from legacy SHADOW)" -ForegroundColor Green
 Write-Host "Futures-maker scenario: ON | max 1 trade | 100% simulated allocation" -ForegroundColor Green
 Write-Host "Unvalidated/no-cost-edge churn: OFF" -ForegroundColor Yellow
 Write-Host "LIVE orders: DISABLED" -ForegroundColor Yellow
