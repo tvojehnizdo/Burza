@@ -70,6 +70,15 @@ def system_context() -> dict[str, Any]:
         except Exception:
             pass
 
+    try:
+        if os.getenv("KRAKEN_FUTURES_API_KEY") and os.getenv("KRAKEN_FUTURES_API_SECRET"):
+            import futures_private
+            ctx["kraken_futures"] = futures_private.readiness()
+        else:
+            ctx["kraken_futures"] = {"configured": False}
+    except Exception as exc:
+        ctx["kraken_futures"] = {"error": f"{type(exc).__name__}: {exc}"}
+
     ctx["policy"] = load_policy()
     return ctx
 
@@ -158,6 +167,15 @@ def apply_actions(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 results.append({"type": typ, "ok": True, "result": _post("/api/v4/stop")})
             elif typ == "cancel_all":
                 results.append({"type": typ, "ok": True, "result": cancel_all_orders()})
+            elif typ == "futures_deadman":
+                import futures_private
+                timeout_s = int(action.get("timeout_s", 60))
+                timeout_s = max(10, min(timeout_s, 300))
+                results.append({
+                    "type": typ,
+                    "ok": True,
+                    "result": futures_private.client_from_env().deadman(timeout_s),
+                })
             elif typ == "set_policy":
                 patch = dict(action.get("patch") or {})
                 if patch.get("live_execution") is True:
