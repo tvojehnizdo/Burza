@@ -13,7 +13,7 @@ $freeGB = [math]::Round((Get-PSDrive $drive).Free / 1GB, 1)
 Write-Host "Free space on $($drive): $freeGB GB"
 
 if ($freeGB -ge 35) {
-    $cmd = "Set-Location '$PSScriptRoot'; Set-ExecutionPolicy -Scope Process Bypass -Force; .\.venv\Scripts\Activate.ps1; python history_fetch.py --full"
+    $cmd = "Set-Location '$PSScriptRoot'; Set-ExecutionPolicy -Scope Process Bypass -Force; .\.venv\Scripts\Activate.ps1; python history_fetch.py --full; python historical_research.py --root data/kraken_history/full --symbols XBTUSD ETHUSD SOLUSD XRPUSD --out reports/history-alpha.json"
     Start-Process powershell.exe -ArgumentList "-NoExit", "-Command", $cmd
     Write-Host "Full official Kraken OHLCVT download started in a second window." -ForegroundColor Green
 } else {
