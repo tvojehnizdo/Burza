@@ -217,3 +217,6 @@ A separate PAPER research lane for GBP/JPY. It keeps TECHNICAL and NEWS hypothes
 
 ### RV LIVE CANARY FINAL VALIDATION
 This marker exists to run full CI against the final hardened canary implementation, including persisted OPENING/OPEN_ERROR states and immediate reduce-only flatten attempts on explicit DISARM.
+
+### RV V2 canonical DB validation
+All Relative Value PAPER, status, readiness and live-canary processes are pinned to data/relative_value_v2.db unless RV_DB is explicitly overridden.
