@@ -229,3 +229,6 @@ Status reporting now shows private Kraken account capital separately from PAPER 
 
 ### Sequential hunter validation
 The neutral profile now records a 12-pair spot microstructure universe and runs one SHADOW trade at a time using only cost-positive candidates, plus one sequential futures-maker economic proxy trade at a time. Both lanes remain PAPER/SHADOW only.
+
+### Hunter ledger isolation validation
+Sequential hunter uses data/pulse_hunter_v1.db so legacy SHADOW trades/equity do not contaminate the new sequential test.
