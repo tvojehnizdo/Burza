@@ -26,7 +26,7 @@ for symbol in ["XBTUSD", "ETHUSD", "SOLUSD"]:
 
 for symbol in engine.FUTURES_SYMBOLS:
     try:
-        df = engine.futures_klines(symbol, 720)
+        df = engine.futures_klines(symbol, 5000)
         report["futures"][symbol] = {
             "bars": len(df),
             "latest_pulse": engine.live_futures_pulse(symbol),
