@@ -53,6 +53,16 @@ def scan(
 ) -> dict[str, Any]:
     markets = discover(max_pairs=max_pairs, max_spread_bps=max_spread_bps)
     out: list[dict[str, Any]] = []
+    rejected = {
+        "no_funded_quote": 0,
+        "ohlc_error": 0,
+        "insufficient_ohlc": 0,
+        "invalid_price": 0,
+        "below_minimum": 0,
+        "nonpositive_edge": 0,
+        "signal_quality": 0,
+    }
+    ohlc_errors: list[dict[str, str]] = []
 
     usd = float(balances.get("ZUSD") or balances.get("USD") or 0.0)
     usdc = float(balances.get("USDC") or 0.0)
@@ -63,18 +73,24 @@ def scan(
         quote = str(meta.get("quote") or (ws.split("/",1)[1] if "/" in ws else ""))
         available = usdc if quote == "USDC" else usd if quote == "USD" else 0.0
         if available <= 0:
+            rejected["no_funded_quote"] += 1
             continue
 
         try:
             df = _ohlc(alt, 90)
-        except Exception:
+        except Exception as exc:
+            rejected["ohlc_error"] += 1
+            if len(ohlc_errors) < 8:
+                ohlc_errors.append({"pair": alt, "error": f"{type(exc).__name__}: {exc}"})
             continue
         if len(df) < 35:
+            rejected["insufficient_ohlc"] += 1
             continue
 
         close = df["close"]
         last = float(close.iloc[-1])
         if last <= 0:
+            rejected["invalid_price"] += 1
             continue
 
         r3 = _ret(close, 3)
@@ -146,6 +162,13 @@ def scan(
             and size_ok
         )
 
+        if not size_ok:
+            rejected["below_minimum"] += 1
+        elif net_edge_bps < min_net_edge_bps:
+            rejected["nonpositive_edge"] += 1
+        elif not (trend_ok and momentum_ok and vol_ratio >= 0.45 and expected_move_bps > 0):
+            rejected["signal_quality"] += 1
+
         score = (
             net_edge_bps
             + (10.0 if trend_ok else 0.0)
@@ -191,7 +214,11 @@ def scan(
         "reason": "FAST_CANARY_READY" if ready else "NO_POSITIVE_FAST_CANARY",
         "candidate": ready[0] if ready else (out[0] if out else None),
         "ready_count": len(ready),
+        "markets_discovered": len(markets),
         "scanned_count": len(out),
+        "rejected": rejected,
+        "ohlc_errors": ohlc_errors,
+        "balances_seen": {"USD": usd, "USDC": usdc},
         "top": out[:12],
         "actual_order_submitted": False,
         "note": "Fast canary uses live 1m OHLC/momentum/ATR and maker-cost economics; it is a screening proxy, not a guarantee of profit.",
