@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+$env:RV_DB = "data/relative_value_v2.db"
 
 $BaseUrl = "http://127.0.0.1:8765"
 $OutDir = Join-Path $PSScriptRoot "stav_reporty"
