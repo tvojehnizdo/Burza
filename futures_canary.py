@@ -329,9 +329,16 @@ def private_plan() -> dict[str, Any]:
         reverse=True,
     )
 
+    if executable:
+        plan_reason = "FUTURES_CANARY_EXECUTABLE"
+    elif not candidates:
+        plan_reason = "NO_CURRENT_FUTURES_SIGNAL"
+    else:
+        plan_reason = "SIGNAL_EXISTS_BUT_NOT_EXECUTABLE"
+
     return {
         "ready": bool(executable),
-        "reason": "FUTURES_CANARY_EXECUTABLE" if executable else "SIGNAL_EXISTS_BUT_NOT_EXECUTABLE",
+        "reason": plan_reason,
         "candidate": executable[0] if executable else None,
         "alternatives": executable[1:],
         "rejected_candidates": rejected,
