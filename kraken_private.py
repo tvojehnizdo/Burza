@@ -270,6 +270,7 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
     open_orders = {}
     open_positions = {}
     errors = {}
+    ws_token_ok = False
 
     for name, endpoint, payload in [
         ("balance", "Balance", {}),
@@ -289,6 +290,12 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
                 open_positions = result
         except Exception as exc:
             errors[name] = str(exc)
+
+    try:
+        client.private("GetWebSocketsToken")
+        ws_token_ok = True
+    except Exception as exc:
+        errors["websocket_token"] = str(exc)
 
     # Safe permission/execution-path test: validate=true means the order is
     # checked by Kraken but never sent to the matching engine.
@@ -315,8 +322,15 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
         validate_order = {"ok": False, "validate_only": True, "error": str(exc)}
 
     checks["validated_margin_order_path"] = bool(validate_order.get("ok"))
+    checks["websocket_token_ok"] = ws_token_ok
     checks["no_private_read_errors"] = not bool(errors)
-    checks["required_trading_permissions"] = checks["query_funds"] and checks["query_open_trades"] and checks["modify_trades"] and checks["close_trades"]
+    checks["required_trading_permissions"] = (
+        checks["query_funds"]
+        and checks["query_open_trades"]
+        and checks["modify_trades"]
+        and checks["close_trades"]
+        and checks["create_ws_token"]
+    )
 
     safe_to_arm = all([
         checks["auth_ok"],
@@ -324,6 +338,8 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
         checks["withdraw_address_admin_disabled"],
         checks["required_trading_permissions"],
         checks["validated_margin_order_path"],
+        checks["websocket_token_ok"],
+        checks["no_private_read_errors"],
     ])
 
     sanitized_info = {
