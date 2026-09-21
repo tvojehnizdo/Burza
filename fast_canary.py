@@ -72,9 +72,9 @@ def scan(
         alt = str(meta.get("altname") or ws.replace("/", ""))
         quote = str(meta.get("quote") or (ws.split("/",1)[1] if "/" in ws else ""))
         available = usdc if quote == "USDC" else usd if quote == "USD" else 0.0
-        if available <= 0:
+        balance_known = available > 0
+        if not balance_known:
             rejected["no_funded_quote"] += 1
-            continue
 
         try:
             df = _ohlc(alt, 90)
@@ -151,7 +151,7 @@ def scan(
 
         minimum_notional = max(costmin, ordermin * last)
         deployable = available * 0.95
-        size_ok = deployable >= minimum_notional and minimum_notional > 0
+        size_ok = balance_known and deployable >= minimum_notional and minimum_notional > 0
 
         quality = (
             trend_ok
@@ -181,6 +181,7 @@ def scan(
             "quote": quote,
             "price": last,
             "available_quote": round(available, 8),
+            "balance_known": balance_known,
             "deployable_quote_95pct": round(deployable, 8),
             "ordermin_base": ordermin,
             "costmin_quote": costmin,
