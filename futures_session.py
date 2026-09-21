@@ -46,6 +46,9 @@ def _session_policy_disarm() -> None:
 def _entry_allowed(now_ms: int, state: dict[str, Any]) -> tuple[bool, str]:
     deadline = int(state.get("session_deadline_ts_ms") or 0)
     entries = int(state.get("session_entry_count") or 0)
+    halt_reason = str(state.get("entry_halt_reason") or "")
+    if halt_reason:
+        return False, halt_reason
     if deadline and now_ms >= deadline:
         return False, "SESSION_TIME_LIMIT_REACHED"
     if entries >= SESSION_MAX_ENTRIES:
@@ -98,6 +101,12 @@ def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
 
         first = execute_candidate(dict(long_plan["candidate"]))
         if not (first.get("ok") and first.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"):
+            if first.get("actual_order_submitted"):
+                state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
+                state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
+                state["entry_halt_reason"] = "LIVE_ABORT_CIRCUIT_BREAKER"
+                _log({"event": "PAIR_FIRST_LEG_LIVE_ABORT_HALT", "pair": pair, "first": first})
+                return {"ok": False, "reason": "LIVE_ABORT_CIRCUIT_BREAKER", "pair": pair}
             continue
 
         _manage_positions(client, state)
@@ -112,8 +121,14 @@ def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
         second = execute_candidate(dict(short_plan["candidate"]))
         if not (second.get("ok") and second.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"):
             rollback = _rollback_pair_leg(client, state, long_symbol, "PAIR_SECOND_LEG_FAILED")
-            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "second": second, "rollback": rollback})
-            return {"ok": False, "reason": "PAIR_SECOND_LEG_FAILED", "pair": pair}
+            actual_entries = 1 + (1 if second.get("actual_order_submitted") else 0)
+            state["session_entry_count"] = int(state.get("session_entry_count") or 0) + actual_entries
+            state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + actual_entries
+            if second.get("actual_order_submitted"):
+                state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
+            state["entry_halt_reason"] = "PAIR_EXECUTION_FAILURE_CIRCUIT_BREAKER"
+            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "second": second, "rollback": rollback, "entry_halted": True})
+            return {"ok": False, "reason": "PAIR_EXECUTION_FAILURE_CIRCUIT_BREAKER", "pair": pair}
 
         _manage_positions(client, state)
         state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 2
@@ -177,6 +192,11 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
 
     if result.get("reason") == "FUTURES_CANARY_ABORTED":
         state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
+        if result.get("actual_order_submitted"):
+            state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
+            state["entry_halt_reason"] = "LIVE_ABORT_CIRCUIT_BREAKER"
+            _log({"event": "BOUNDED_SESSION_LIVE_ABORT_HALT", "result": result, "pair_reason": pair_result.get("reason")})
+            return {"ok": False, "reason": "LIVE_ABORT_CIRCUIT_BREAKER"}
 
     _log({"event": "BOUNDED_SESSION_ENTRY_NOT_OPENED", "result": result, "pair_reason": pair_result.get("reason")})
     return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
@@ -196,6 +216,7 @@ def run_session() -> None:
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
     state["session_entry_count"] = 0
+    state.pop("entry_halt_reason", None)
     state["session_capital_usd"] = min(SESSION_CAPITAL_USD, float(initial["equity_usd"]))
     _save_state(state)
 
