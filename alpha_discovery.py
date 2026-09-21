@@ -1016,6 +1016,28 @@ class AlphaRuntime:
                 "equity": round(scenario_equity(self.db_path), 2),
                 "open_trades": scenario_open_n,
                 "closed_trades": scenario_closed_n,
+                "candidate_count": (
+                    len(self.last_models.get("shadow_candidates", []))
+                    if self.last_models else 0
+                ),
+                "cost_positive_candidate_count": (
+                    int(
+                        self.last_models
+                        .get("economic_sensitivity", {})
+                        .get("lanes", {})
+                        .get("futures_maker_proxy", {})
+                        .get("cost_positive_candidate_count", 0)
+                    )
+                    if self.last_models else 0
+                ),
+                "best_net_edge_proxy_bps": (
+                    self.last_models
+                    .get("economic_sensitivity", {})
+                    .get("lanes", {})
+                    .get("futures_maker_proxy", {})
+                    .get("best_net_edge_proxy_bps")
+                    if self.last_models else None
+                ),
                 "recent": recent_scenario,
                 "counts_for_live_gate": False,
                 "actual_futures_validation_required": True,
