@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import time
 from pathlib import Path
 from typing import Any
 
-from engine import live_futures_pulse
+import pandas as pd
+import requests
+
 from futures_private import (
     client_from_env,
     load_policy,
@@ -35,6 +36,114 @@ MIN_TAKER_NET_EDGE_BPS = 5.0
 MAX_NOTIONAL_USD = 3.0
 MAX_NOTIONAL_PCT_EQUITY = 25.0
 MAX_OPEN_POSITIONS = 1
+CHARTS = "https://futures.kraken.com/api/charts/v1"
+
+
+def _candles(symbol: str, count: int = 120) -> pd.DataFrame:
+    r = requests.get(
+        f"{CHARTS}/trade/{symbol}/1m",
+        params={"count": count},
+        timeout=15,
+    )
+    r.raise_for_status()
+    body = r.json()
+    rows = body.get("candles") or []
+    if not rows:
+        raise RuntimeError(f"No futures candles for {symbol}")
+    df = pd.DataFrame(rows)
+    needed = ["time", "open", "high", "low", "close", "volume"]
+    missing = [x for x in needed if x not in df.columns]
+    if missing:
+        raise RuntimeError(f"Unexpected futures candle schema for {symbol}: {missing}")
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna().reset_index(drop=True)
+
+
+def _ret(s: pd.Series, n: int) -> float:
+    if len(s) <= n:
+        return 0.0
+    a = float(s.iloc[-n - 1])
+    b = float(s.iloc[-1])
+    return b / a - 1.0 if a > 0 else 0.0
+
+
+def _signal(symbol: str) -> dict[str, Any]:
+    df = _candles(symbol, 120)
+    if len(df) < 65:
+        raise RuntimeError(f"Insufficient candles for {symbol}: {len(df)}")
+
+    close = df["close"]
+    last = float(close.iloc[-1])
+    ema6 = float(close.ewm(span=6, adjust=False).mean().iloc[-1])
+    ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
+    r5 = _ret(close, 5)
+    r15 = _ret(close, 15)
+    r30 = _ret(close, 30)
+    r60 = _ret(close, 60)
+
+    prev = close.shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev).abs(),
+        (df["low"] - prev).abs(),
+    ], axis=1).max(axis=1)
+    atr = float(tr.tail(14).mean())
+    atr_bps = atr / last * 10000.0 if last > 0 else 0.0
+
+    vol_med = float(df["volume"].tail(30).median())
+    vol_ratio = float(df["volume"].iloc[-1] / vol_med) if vol_med > 0 else 1.0
+
+    up = last > ema6 > ema20 and r5 > 0 and r15 > 0
+    down = last < ema6 < ema20 and r5 < 0 and r15 < 0
+    side = "LONG" if up else "SHORT" if down else "NONE"
+
+    momentum_bps = max(
+        abs(r5) * 10000.0 * 0.55,
+        abs(r15) * 10000.0 * 0.70,
+        abs(r30) * 10000.0 * 0.55,
+        abs(r60) * 10000.0 * 0.35,
+    )
+    expected_bps = max(0.0, min(momentum_bps, atr_bps * 5.0))
+    net_taker_bps = expected_bps - ROUND_TRIP_TAKER_COST_BPS
+
+    confirmations = 0
+    if side != "NONE":
+        confirmations += 1
+    if (side == "LONG" and r30 > 0) or (side == "SHORT" and r30 < 0):
+        confirmations += 1
+    if (side == "LONG" and r60 > 0) or (side == "SHORT" and r60 < 0):
+        confirmations += 1
+    if vol_ratio >= 0.45:
+        confirmations += 1
+
+    confidence = min(0.95, 0.45 + 0.10 * confirmations + min(expected_bps / 500.0, 0.15))
+    ready = (
+        side in {"LONG", "SHORT"}
+        and confirmations >= 3
+        and confidence >= 0.64
+        and net_taker_bps >= MIN_TAKER_NET_EDGE_BPS
+    )
+
+    return {
+        "symbol": symbol,
+        "market": "futures",
+        "price": last,
+        "side": side,
+        "confidence": round(confidence, 4),
+        "confirmations": confirmations,
+        "r5_bps": round(r5 * 10000.0, 3),
+        "r15_bps": round(r15 * 10000.0, 3),
+        "r30_bps": round(r30 * 10000.0, 3),
+        "r60_bps": round(r60 * 10000.0, 3),
+        "atr_pct": round(atr_bps / 100.0, 4),
+        "atr_bps": round(atr_bps, 3),
+        "volume_ratio": round(vol_ratio, 3),
+        "expected_move_proxy_bps": round(expected_bps, 3),
+        "taker_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
+        "taker_net_edge_bps": round(net_taker_bps, 3),
+        "canary_signal_ready": bool(ready),
+    }
 
 
 def _log(event: dict[str, Any]) -> None:
@@ -48,32 +157,9 @@ def public_scan() -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for symbol in SYMBOLS:
         try:
-            p = live_futures_pulse(symbol)
+            rows.append(_signal(symbol))
         except Exception as exc:
             rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        if not p:
-            continue
-
-        expected_bps = float(p.get("expected_move_proxy_pct") or 0.0) * 100.0
-        net_taker_bps = expected_bps - ROUND_TRIP_TAKER_COST_BPS
-        side = str(p.get("side") or "NONE").upper()
-        confidence = float(p.get("confidence") or 0.0)
-        pulse = bool(p.get("pulse"))
-
-        p = dict(p)
-        p.update({
-            "expected_move_proxy_bps": round(expected_bps, 3),
-            "taker_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
-            "taker_net_edge_bps": round(net_taker_bps, 3),
-            "canary_signal_ready": bool(
-                pulse
-                and side in {"LONG", "SHORT"}
-                and confidence >= 0.64
-                and net_taker_bps >= MIN_TAKER_NET_EDGE_BPS
-            ),
-        })
-        rows.append(p)
 
     rows.sort(
         key=lambda x: (
@@ -93,6 +179,7 @@ def public_scan() -> dict[str, Any]:
         "round_trip_taker_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "min_net_edge_bps": MIN_TAKER_NET_EDGE_BPS,
         "actual_order_submitted": False,
+        "note": "Public 1m futures momentum/ATR screen; not a guarantee of profit.",
     }
 
 
