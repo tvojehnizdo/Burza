@@ -1,4 +1,4 @@
-# IMPULSE MAX 5K — Kraken Pulse Hunter V2
+# IMPULSE MAX 5K — Kraken Pulse Hunter V3
 
 PAPER/REPLAY engine for finding cost-adjusted pulses on Kraken. LIVE orders are disabled.
 
@@ -32,3 +32,14 @@ REST OHLC provides only a short recent window. It is a smoke test, not proof of 
 V2 now also contains a **PAPER-only Kraken derivatives lane** for PF_XBTUSD, PF_ETHUSD and PF_SOLUSD. This is intentionally separate from LIVE. The reason is economic: Tier-1 futures maker fees are materially lower than Tier-1 spot fees, so sub-minute/minute pulses can be tested without forcing a structurally uneconomic spot scalp. The model caps notional below equity and does not enable leverage or live order submission.
 
 Endpoint: /api/futures-pulses
+
+
+## V3 audit changes
+- symmetric LONG/SHORT pulse logic for the PAPER derivatives lane
+- next-bar execution remains mandatory to avoid signal-bar lookahead
+- hard expected-move / round-trip-cost gate before a candidate can trade
+- trend, slow momentum, breakout, range reversion, volume and volatility-shock logic are cross-checked for contradictions
+- PAPER derivatives scan widened to BTC, ETH, SOL, gold, silver, WTI oil and selected equity-linked perpetuals
+- spot remains long-only and intentionally rejects ordinary micro-scalps when Tier-1 costs dominate the predicted move
+
+This is still a research gate: a profitable holdout is required before any LIVE implementation.
