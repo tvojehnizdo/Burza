@@ -235,3 +235,6 @@ Dashboard exposes a read-only executable-candidate gate that requires a current 
 
 ### Fast canary validation
 A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fallback executable candidate when learned microstructure has no cost-positive state. It remains read-only and never submits an order.
+
+### Futures canary validation
+A standalone Kraken Futures canary scans BTC/ETH/SOL using 1-minute derivatives candles, prices Tier-1 taker costs conservatively, caps one live position at 25% of futures equity and USD 3 notional, and requires exchange-side reduce-only stop/take-profit protection after entry.
