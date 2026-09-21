@@ -25,9 +25,9 @@ PULSE_MIN = float(os.getenv("PULSE_MIN", "0.64"))
 UNIVERSE_MAX = int(os.getenv("UNIVERSE_MAX", "24"))
 SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
-FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD").split(",") if s.strip()]
+FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="2.0")
+app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="3.0")
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "ImpulseMax5K/2.0"})
 
@@ -35,6 +35,7 @@ SESSION.headers.update({"User-Agent": "ImpulseMax5K/2.0"})
 @dataclass
 class Trade:
     symbol: str
+    side: str
     entry_time: str
     exit_time: str
     entry: float
@@ -114,70 +115,123 @@ def features(df: pd.DataFrame, fast: int = 8, slow: int = 24, zwin: int = 30, at
     x["es"] = x.close.ewm(span=slow, adjust=False).mean()
     x["ret"] = np.log(x.close / x.close.shift(1))
     x["mom"] = x.close.pct_change(fast)
+    x["mom_slow"] = x.close.pct_change(slow)
     x["mu"] = x.close.rolling(zwin).mean()
     x["sd"] = x.close.rolling(zwin).std(ddof=0)
     x["z"] = (x.close - x.mu) / x.sd.replace(0, np.nan)
     prev = x.close.shift(1)
     tr = pd.concat([(x.high - x.low), (x.high - prev).abs(), (x.low - prev).abs()], axis=1).max(axis=1)
     x["atr"] = tr.rolling(atrn).mean()
+    x["atr_med"] = x["atr"].rolling(60).median()
     medv = x.volume.rolling(30).median().replace(0, np.nan)
     x["rv"] = x.volume / medv
     x["hh"] = x.high.shift(1).rolling(20).max()
+    x["ll"] = x.low.shift(1).rolling(20).min()
     return x
 
 
 def pulse_logic(row: pd.Series) -> dict[str, Any]:
-    vals = [row.get(k) for k in ("close", "ef", "es", "mom", "z", "rv", "atr")]
-    if any(pd.isna(v) for v in vals):
-        return {"pulse": False, "confidence": 0.0, "confirmations": 0, "contradictions": 99, "regime": "WARMUP"}
+    required = ("close", "ef", "es", "mom", "mom_slow", "z", "rv", "atr", "atr_med", "hh", "ll")
+    if any(pd.isna(row.get(k)) for k in required):
+        return {
+            "pulse": False, "side": "NONE", "confidence": 0.0,
+            "confirmations": 0, "contradictions": 99, "regime": "WARMUP",
+            "trend": 0.0, "momentum": 0.0, "atrp": 0.0, "z": 0.0, "rv": 0.0
+        }
 
     close = float(row.close)
     trend = float((row.ef - row.es) / close)
     mom = float(row.mom)
+    mom_slow = float(row.mom_slow)
     z = float(row.z)
     rv = float(row.rv)
     atrp = float(row.atr / close)
-    breakout = bool(pd.notna(row.hh) and row.close > row.hh)
+    volshock = float(row.atr / row.atr_med) if float(row.atr_med) > 0 else 1.0
 
-    trend_up = trend > 0.0010
-    momentum_up = mom > 0.0015
-    volume_ok = rv > 1.05
-    breakout_ok = breakout and rv > 1.0
-    range_revert = abs(trend) < 0.0010 and z < -2.0 and rv < 2.8
+    breakout_up = bool(row.close > row.hh)
+    breakout_dn = bool(row.close < row.ll)
+    weak_trend = abs(trend) < 0.0010
 
-    confirmations = int(trend_up) + int(momentum_up) + int(volume_ok) + int(breakout_ok)
-    contradictions = sum([
-        bool(trend_up and mom < 0),
-        bool(momentum_up and trend < 0),
-        bool(breakout and rv < 0.75),
-        bool(abs(z) > 4.0),
-        bool(atrp > 0.04),
-    ])
-
-    regime = "RANGE_REVERSION" if range_revert else ("TREND" if abs(trend) >= 0.0010 else "RANGE")
+    # Directional score is symmetric. Positive = LONG, negative = SHORT.
     directional = (
-        0.45 * np.tanh(trend * 260)
-        + 0.35 * np.tanh(mom * 40)
-        + 0.12 * int(breakout)
-        + 0.08 * np.tanh(max(rv - 1.0, 0.0))
+        0.36 * np.tanh(trend * 300)
+        + 0.30 * np.tanh(mom * 45)
+        + 0.16 * np.tanh(mom_slow * 22)
+        + 0.10 * (1 if breakout_up else (-1 if breakout_dn else 0))
     )
-    confidence = 0.46 + 0.10 * confirmations - 0.18 * contradictions + 0.12 * max(float(directional), 0.0)
-    if range_revert:
-        confidence = max(confidence, 0.68 + min(abs(z) - 2.0, 1.0) * 0.05)
-    confidence = float(np.clip(confidence, 0.0, 0.99))
-    coherent = (confirmations >= 3 or range_revert) and contradictions == 0
+    if rv > 1.15:
+        directional *= 1.08
 
+    range_side = "NONE"
+    if weak_trend and z <= -2.1 and volshock < 2.4:
+        range_side = "LONG"
+    elif weak_trend and z >= 2.1 and volshock < 2.4:
+        range_side = "SHORT"
+
+    if range_side != "NONE":
+        side = range_side
+        regime = "RANGE_REVERSION"
+    elif directional > 0.20:
+        side = "LONG"
+        regime = "TREND"
+    elif directional < -0.20:
+        side = "SHORT"
+        regime = "TREND"
+    else:
+        side = "NONE"
+        regime = "RANGE"
+
+    long_evidence = [
+        trend > 0.0008, mom > 0.0012, mom_slow > 0.0015,
+        breakout_up and rv >= 0.9
+    ]
+    short_evidence = [
+        trend < -0.0008, mom < -0.0012, mom_slow < -0.0015,
+        breakout_dn and rv >= 0.9
+    ]
+    if side == "LONG":
+        confirmations = sum(bool(x) for x in long_evidence)
+        contradictions = sum(bool(x) for x in short_evidence)
+    elif side == "SHORT":
+        confirmations = sum(bool(x) for x in short_evidence)
+        contradictions = sum(bool(x) for x in long_evidence)
+    else:
+        confirmations, contradictions = 0, 0
+
+    # Explicitly reject fragile conditions rather than interpreting them as alpha.
+    if (breakout_up or breakout_dn) and rv < 0.65:
+        contradictions += 1
+    if volshock > 3.0 or atrp > 0.045:
+        contradictions += 1
+
+    if range_side != "NONE":
+        confirmations = max(confirmations, 2)
+        confidence = 0.64 + min(max(abs(z) - 2.1, 0.0), 1.5) * 0.07
+    else:
+        confidence = 0.43 + 0.105 * confirmations + 0.13 * min(abs(float(directional)), 1.0)
+        if rv > 1.2:
+            confidence += 0.035
+    confidence -= 0.17 * contradictions
+    confidence = float(np.clip(confidence, 0.0, 0.99))
+
+    coherent = side != "NONE" and contradictions == 0 and (
+        confirmations >= 3 or range_side != "NONE"
+    )
     return {
         "pulse": bool(coherent and confidence >= PULSE_MIN),
+        "side": side,
         "confidence": round(confidence, 4),
-        "confirmations": confirmations,
+        "confirmations": int(confirmations),
         "contradictions": int(contradictions),
         "regime": regime,
         "trend": trend,
         "momentum": mom,
+        "momentum_slow": mom_slow,
+        "directional_score": round(float(directional), 5),
         "atrp": atrp,
         "z": z,
         "rv": rv,
+        "volshock": round(volshock, 4),
     }
 
 
@@ -203,7 +257,7 @@ def live_pulse(symbol: str) -> dict[str, Any] | None:
         "expected_move_proxy_pct": round(expected_move * 100, 3),
         "round_trip_cost_floor_pct": round(round_trip * 100, 3),
         "net_edge_proxy_pct": round(net_edge * 100, 3),
-        "tradeable": bool(p["pulse"] and net_edge > round_trip * 0.5 and p["confidence"] >= PULSE_MIN),
+        "tradeable": bool(p["pulse"] and p["side"] == "LONG" and expected_move >= round_trip * 1.35 and p["confidence"] >= PULSE_MIN),
     })
     return p
 
@@ -216,36 +270,50 @@ def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any], market: str = 
     trades: list[Trade] = []
     pos: dict[str, Any] | None = None
     side_cost = per_side_cost_rate(market)
-    warmup = max(params["slow"], params["zwin"], 35)
+    warmup = max(params["slow"], params["zwin"], 65)
 
     for i in range(warmup, len(x) - 1):
         row = x.iloc[i]
         nxt = x.iloc[i + 1]
 
         if pos is not None:
-            stop_px = pos["entry"] * (1.0 - pos["stop"])
-            take_px = pos["entry"] * (1.0 + pos["take"])
+            sign = 1.0 if pos["side"] == "LONG" else -1.0
+            if pos["side"] == "LONG":
+                stop_px = pos["entry"] * (1.0 - pos["stop"])
+                take_px = pos["entry"] * (1.0 + pos["take"])
+                stop_hit = float(row.low) <= stop_px
+                take_hit = float(row.high) >= take_px
+            else:
+                stop_px = pos["entry"] * (1.0 + pos["stop"])
+                take_px = pos["entry"] * (1.0 - pos["take"])
+                stop_hit = float(row.high) >= stop_px
+                take_hit = float(row.low) <= take_px
+
             age = i - pos["signal_i"]
+            now_pulse = pulse_logic(row)
             reason = None
             exit_px = None
 
-            if float(row.low) <= stop_px:
+            # Conservative ordering if both barriers are crossed inside one OHLC candle.
+            if stop_hit:
                 reason, exit_px = "SL", stop_px
-            elif float(row.high) >= take_px:
+            elif take_hit:
                 reason, exit_px = "TP", take_px
             elif age >= params["max_hold"]:
                 reason, exit_px = "TIME", float(row.close)
-            elif pulse_logic(row)["contradictions"] >= 2 and age >= 2:
+            elif now_pulse["pulse"] and now_pulse["side"] not in ("NONE", pos["side"]) and age >= 2:
+                reason, exit_px = "REVERSAL", float(row.close)
+            elif now_pulse["contradictions"] >= 2 and age >= 2:
                 reason, exit_px = "CONTRADICTION", float(row.close)
 
             if reason:
-                gross_ret = (exit_px - pos["entry"]) / pos["entry"]
+                gross_ret = sign * (exit_px - pos["entry"]) / pos["entry"]
                 gross = pos["notional"] * gross_ret
                 costs = pos["notional"] * side_cost + max(pos["notional"] + gross, 0.0) * side_cost
                 pnl = gross - costs
                 eq += pnl
                 trades.append(Trade(
-                    symbol, str(pos["time"]), str(row.ts), pos["entry"], exit_px,
+                    symbol, pos["side"], str(pos["time"]), str(row.ts), pos["entry"], exit_px,
                     pos["notional"], pnl, costs, reason, eq
                 ))
                 pos = None
@@ -259,11 +327,22 @@ def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any], market: str = 
             pulse = pulse_logic(row)
             if not pulse["pulse"] or pulse["confidence"] < params["threshold"]:
                 continue
+            side = pulse["side"]
+            if market == "spot" and side != "LONG":
+                continue
 
-            atrp = max(float(pulse["atrp"]), 0.001)
-            stop = max(params["stop_atr"] * atrp, 0.0035)
-            take = max(params["take_atr"] * atrp, 0.006)
+            atrp = max(float(pulse["atrp"]), 0.0005)
             round_trip = 2.0 * side_cost
+            expected_move = max(
+                abs(float(pulse["momentum"])),
+                abs(float(pulse.get("momentum_slow", 0.0))) * 0.55,
+                1.7 * atrp,
+            )
+            if expected_move < params.get("edge_multiple", 1.35) * round_trip:
+                continue
+
+            stop = max(params["stop_atr"] * atrp, round_trip * 0.75)
+            take = max(params["take_atr"] * atrp, round_trip * params["cost_multiple"])
             if take <= params["cost_multiple"] * round_trip:
                 continue
 
@@ -274,24 +353,21 @@ def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any], market: str = 
 
             entry = float(nxt.open)
             pos = {
-                "entry": entry,
-                "time": nxt.ts,
-                "signal_i": i,
-                "notional": notional,
-                "stop": stop,
-                "take": take,
+                "side": side, "entry": entry, "time": nxt.ts, "signal_i": i,
+                "notional": notional, "stop": stop, "take": take,
             }
 
     if pos is not None and len(x):
         row = x.iloc[-1]
         exit_px = float(row.close)
-        gross_ret = (exit_px - pos["entry"]) / pos["entry"]
+        sign = 1.0 if pos["side"] == "LONG" else -1.0
+        gross_ret = sign * (exit_px - pos["entry"]) / pos["entry"]
         gross = pos["notional"] * gross_ret
         costs = pos["notional"] * side_cost + max(pos["notional"] + gross, 0.0) * side_cost
         pnl = gross - costs
         eq += pnl
         trades.append(Trade(
-            symbol, str(pos["time"]), str(row.ts), pos["entry"], exit_px,
+            symbol, pos["side"], str(pos["time"]), str(row.ts), pos["entry"], exit_px,
             pos["notional"], pnl, costs, "EOD", eq
         ))
 
@@ -300,12 +376,17 @@ def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any], market: str = 
     losses = [p for p in pnls if p < 0]
     pf = sum(wins) / abs(sum(losses)) if losses else (99.0 if wins else 0.0)
     expectancy = float(np.mean(pnls)) if pnls else 0.0
+    longs = sum(t.side == "LONG" for t in trades)
+    shorts = sum(t.side == "SHORT" for t in trades)
 
     return {
         "symbol": symbol,
+        "market": market,
         "equity": round(eq, 2),
         "return_pct": round((eq / START_CAPITAL - 1.0) * 100.0, 3),
         "trades": len(trades),
+        "longs": longs,
+        "shorts": shorts,
         "win_rate": round(100.0 * len(wins) / len(pnls), 2) if pnls else 0.0,
         "profit_factor": round(float(pf), 3),
         "expectancy_czk": round(expectancy, 3),
@@ -347,7 +428,7 @@ def optimize(symbol: str) -> dict[str, Any]:
         p = {
             "fast": fast, "slow": slow, "zwin": 30, "threshold": thr,
             "stop_atr": sa, "take_atr": ta, "max_hold": hold,
-            "max_alloc": 0.55, "cost_multiple": 1.5
+            "max_alloc": 0.55, "cost_multiple": 1.5, "edge_multiple": 1.35
         }
         tr = run_bt(train, symbol, p, "spot")
         grid.append((objective(tr), p, tr))
@@ -413,7 +494,7 @@ def live_futures_pulse(symbol: str) -> dict[str, Any] | None:
         "expected_move_proxy_pct": round(expected_move * 100, 3),
         "round_trip_cost_floor_pct": round(round_trip * 100, 3),
         "net_edge_proxy_pct": round(net_edge * 100, 3),
-        "tradeable": bool(p["pulse"] and net_edge > round_trip * 0.5 and p["confidence"] >= PULSE_MIN),
+        "tradeable": bool(p["pulse"] and expected_move >= round_trip * 1.35 and p["confidence"] >= PULSE_MIN),
     })
     return p
 
@@ -478,7 +559,7 @@ def selftest_report() -> dict[str, Any]:
 def home():
     return """<!doctype html><html><head><meta charset='utf-8'><title>IMPULSE MAX 5K</title>
 <style>body{font-family:system-ui;max-width:1000px;margin:35px auto;padding:0 16px;background:#0b1020;color:#e8eefc}button{padding:11px 16px;margin:4px}pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px}</style></head>
-<body><h1>IMPULSE MAX 5K - Kraken Pulse Hunter V2</h1><p>PAPER / REPLAY only. Spot, no leverage. LIVE disabled.</p>
+<body><h1>IMPULSE MAX 5K - Kraken Pulse Hunter V3</h1><p>PAPER / REPLAY only. Spot, no leverage. LIVE disabled.</p>
 <button onclick="go('/api/pulses')">Scan Kraken</button><button onclick="go('/api/run','POST')">Replay</button><button onclick="go('/api/selftest')">Self-test</button><pre id='o'>Ready.</pre>
 <script>async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,{method:m});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=String(e)}}</script></body></html>"""
 
@@ -486,7 +567,7 @@ def home():
 @app.get("/api/health")
 def health():
     return {
-        "ok": True, "version": "2.0", "mode": "PAPER_REPLAY",
+        "ok": True, "version": "3.0", "mode": "PAPER_REPLAY",
         "capital": START_CAPITAL, "live_orders": False
     }
 
