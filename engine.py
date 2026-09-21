@@ -12,11 +12,13 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-KRAKEN = "https://api.kraken.com"\nKRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
+KRAKEN = "https://api.kraken.com"
+KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
 START_CAPITAL = float(os.getenv("START_CAPITAL", "5000"))
 MAX_DD = float(os.getenv("MAX_DRAWDOWN_PCT", "10")) / 100.0
 RISK_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.75")) / 100.0
-SPOT_MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))\nFUTURES_MAKER_FEE_BPS = float(os.getenv("KRAKEN_FUTURES_MAKER_BPS", "2"))
+SPOT_MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))
+FUTURES_MAKER_FEE_BPS = float(os.getenv("KRAKEN_FUTURES_MAKER_BPS", "2"))
 SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "2"))
 EXECUTION_PENALTY_BPS = float(os.getenv("EXECUTION_PENALTY_BPS", "3"))
 PULSE_MIN = float(os.getenv("PULSE_MIN", "0.64"))
