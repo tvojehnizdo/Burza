@@ -36,6 +36,8 @@ DEFAULT_POLICY = {
     "max_order_notional_pct_equity": 10.0,
     "max_order_notional_usd": 15.0,
     "max_open_positions": 2,
+    "max_portfolio_notional_usd": 10.0,
+    "max_portfolio_notional_pct_equity": 50.0,
     "deadman_timeout_s": 60,
     "require_transfer_no_access": True,
 }
@@ -148,7 +150,9 @@ def load_policy() -> dict[str, Any]:
     p["live_execution"] = bool(p.get("live_execution", False))
     p["max_order_notional_pct_equity"] = min(max(float(p.get("max_order_notional_pct_equity", 10.0)), 0.1), 35.0)
     p["max_order_notional_usd"] = min(max(float(p.get("max_order_notional_usd", 15.0)), 1.0), 100.0)
-    p["max_open_positions"] = min(max(int(p.get("max_open_positions", 2)), 1), 4)
+    p["max_open_positions"] = min(max(int(p.get("max_open_positions", 2)), 1), 6)
+    p["max_portfolio_notional_usd"] = min(max(float(p.get("max_portfolio_notional_usd", 10.0)), 1.0), 100.0)
+    p["max_portfolio_notional_pct_equity"] = min(max(float(p.get("max_portfolio_notional_pct_equity", 50.0)), 5.0), 80.0)
     p["deadman_timeout_s"] = min(max(int(p.get("deadman_timeout_s", 60)), 20), 120)
     allowed = [str(x).upper() for x in (p.get("allowed_roots") or DEFAULT_POLICY["allowed_roots"])]
     if "*" in allowed:
@@ -364,6 +368,22 @@ def round_size_down(symbol: str, size: float) -> float:
     decimals = max(0, len(str(step).split(".")[1].rstrip("0")) if "." in str(step) else 0)
     return round(rounded, decimals)
 
+def portfolio_notional_usd(client: KrakenFutures, positions_payload: dict[str, Any] | None = None) -> float:
+    positions_payload = positions_payload or client.open_positions()
+    pos = position_map(positions_payload)
+    tickers = _ticker_map(client.tickers())
+    total = 0.0
+    for symbol, qty in pos.items():
+        px = _mid_price(tickers.get(symbol))
+        if px is None:
+            continue
+        try:
+            total += abs(float(qty)) * px * contract_size(symbol)
+        except Exception:
+            continue
+    return total
+
+
 def order_preflight(symbol: str, side: str, size: float, reduce_only: bool = False, client: KrakenFutures | None = None) -> dict[str, Any]:
     p = load_policy()
     s = str(symbol).upper()
@@ -410,9 +430,25 @@ def order_preflight(symbol: str, side: str, size: float, reduce_only: bool = Fal
     if not reduce_only and notional > cap + 1e-9:
         raise RuntimeError(f"Order notional USD {notional:.4f} exceeds live cap USD {cap:.4f}")
 
-    positions = _position_rows(c.open_positions())
+    positions_payload = c.open_positions()
+    positions = _position_rows(positions_payload)
+    pos_map = position_map(positions_payload)
+
+    if not reduce_only and abs(float(pos_map.get(s, 0.0))) > 0:
+        raise RuntimeError(f"Duplicate live symbol {s} is not allowed")
+
     if not reduce_only and len(positions) >= int(p["max_open_positions"]):
         raise RuntimeError(f"Open position count {len(positions)} reached cap {p['max_open_positions']}")
+
+    current_portfolio_notional = portfolio_notional_usd(c, positions_payload)
+    portfolio_abs_cap = float(p["max_portfolio_notional_usd"])
+    portfolio_pct_cap = equity * float(p["max_portfolio_notional_pct_equity"]) / 100.0 if equity > 0 else portfolio_abs_cap
+    portfolio_cap = min(portfolio_abs_cap, portfolio_pct_cap) if portfolio_pct_cap > 0 else portfolio_abs_cap
+    if not reduce_only and current_portfolio_notional + notional > portfolio_cap + 1e-9:
+        raise RuntimeError(
+            f"Portfolio notional USD {current_portfolio_notional + notional:.4f} "
+            f"would exceed cap USD {portfolio_cap:.4f}"
+        )
 
     return {
         "ok": True,
@@ -426,6 +462,8 @@ def order_preflight(symbol: str, side: str, size: float, reduce_only: bool = Fal
         "equity_usd": equity,
         "notional_cap_usd": cap,
         "open_positions": len(positions),
+        "portfolio_notional_usd": current_portfolio_notional,
+        "portfolio_notional_cap_usd": portfolio_cap,
         "reduce_only": bool(reduce_only),
         "general_permission": general,
         "transfer_permission": transfer,
