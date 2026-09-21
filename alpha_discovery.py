@@ -28,15 +28,15 @@ MAX_ROWS = int(os.getenv("ALPHA_MAX_ROWS", "150000"))
 # Shadow paper is deliberately isolated from the validated PAPER ledger and LIVE gate.
 # It records weaker, explicitly unvalidated state candidates to build evidence faster.
 SHADOW_ENABLED = os.getenv("SHADOW_PAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-SHADOW_MIN_TRAIN = int(os.getenv("SHADOW_MIN_TRAIN", "12"))
-SHADOW_MIN_VALID = int(os.getenv("SHADOW_MIN_VALID", "6"))
-SHADOW_MIN_GROSS_BPS = float(os.getenv("SHADOW_MIN_GROSS_BPS", "0.5"))
-SHADOW_MIN_HIT = float(os.getenv("SHADOW_MIN_HIT", "0.50"))
-SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", "4"))
-SHADOW_ALLOC_PCT = float(os.getenv("SHADOW_ALLOC_PCT", "10")) / 100.0
-SHADOW_MAX_DD_PCT = float(os.getenv("SHADOW_MAX_DRAWDOWN_PCT", "30"))
+SHADOW_MIN_TRAIN = int(os.getenv("SHADOW_MIN_TRAIN", "8"))
+SHADOW_MIN_VALID = int(os.getenv("SHADOW_MIN_VALID", "4"))
+SHADOW_MIN_GROSS_BPS = float(os.getenv("SHADOW_MIN_GROSS_BPS", "0.25"))
+SHADOW_MIN_HIT = float(os.getenv("SHADOW_MIN_HIT", "0.48"))
+SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", "8"))
+SHADOW_ALLOC_PCT = float(os.getenv("SHADOW_ALLOC_PCT", "12.5")) / 100.0
+SHADOW_MAX_DD_PCT = float(os.getenv("SHADOW_MAX_DRAWDOWN_PCT", "35"))
 SHADOW_HORIZONS = tuple(
-    int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "30,60").split(",") if x.strip()
+    int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "15,30,60,120").split(",") if x.strip()
 )
 
 
