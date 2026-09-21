@@ -10,7 +10,7 @@ from futures_canary import _candles
 
 NEG_CORR_MAX = -0.55
 POS_CORR_MIN = 0.70
-MIN_PAIR_MOMENTUM_BPS = 20.0
+MIN_PAIR_MOMENTUM_BPS = 60.0
 MIN_RV_ZSCORE = 1.50
 PAIR_LOOKBACK = 60
 
@@ -141,9 +141,9 @@ def scan_pairs(symbols: list[str]) -> dict[str, Any]:
 
 
 def selftest() -> dict[str, Any]:
-    a = pd.Series([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110], dtype=float)
-    b = pd.Series([200, 198, 196, 194, 192, 190, 188, 186, 184, 182, 180], dtype=float)
-    c = pd.Series([50, 50.5, 51, 51.5, 52, 52.5, 53, 53.5, 54, 54.5, 55], dtype=float)
+    a = pd.Series([100.0 + i * 0.7 + ((i % 5) - 2) * 0.08 for i in range(80)], dtype=float)
+    b = pd.Series([200.0 - i * 1.1 - ((i % 5) - 2) * 0.12 for i in range(80)], dtype=float)
+    c = pd.Series([50.0 + i * 0.35 + ((i % 5) - 2) * 0.04 for i in range(80)], dtype=float)
 
     corr_inv = _corr(a, b)
     corr_pos = _corr(a, c)
