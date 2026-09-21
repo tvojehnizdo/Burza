@@ -53,6 +53,19 @@ SHADOW_HORIZONS = tuple(
     int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "30,60,120,300,600,900").split(",") if x.strip()
 )
 
+# Economic sensitivity lanes are diagnostics only. They answer whether the
+# same observed gross edge would survive different fee/execution structures.
+# Only the active execution mode can open SHADOW/PAPER trades.
+ECONOMIC_COST_LANES_BPS = {
+    "spot_market_taker": ALPHA_COST_BPS,
+    "spot_post_only_proxy": float(os.getenv(
+        "V4_SPOT_POST_ONLY_PROXY_BPS",
+        str(2.0 * KRAKEN_MAKER_FEE_BPS + 2.0 * SLIPPAGE_BPS + EXECUTION_PENALTY_BPS),
+    )),
+    "futures_taker_proxy": float(os.getenv("V4_FUTURES_TAKER_PROXY_BPS", "17")),
+    "futures_maker_proxy": float(os.getenv("V4_FUTURES_MAKER_PROXY_BPS", "11")),
+}
+
 
 def ternary(value: float, threshold: float) -> int:
     if value > threshold:
@@ -308,6 +321,33 @@ def discover_shadow_models(raw: pd.DataFrame) -> list[dict[str, Any]]:
     return all_models[:200]
 
 
+def economic_sensitivity(shadow_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Diagnostic cost ladder; never counts as validation or opens trades."""
+    lanes: dict[str, Any] = {}
+    for name, cost_bps in ECONOMIC_COST_LANES_BPS.items():
+        positives = [
+            x for x in shadow_candidates
+            if float(x.get("gross_edge_bps", 0.0)) - float(cost_bps) > 0
+        ]
+        best = max(
+            (
+                float(x.get("gross_edge_bps", 0.0)) - float(cost_bps)
+                for x in shadow_candidates
+            ),
+            default=None,
+        )
+        lanes[name] = {
+            "cost_bps": round(float(cost_bps), 4),
+            "cost_positive_candidate_count": len(positives),
+            "best_net_edge_proxy_bps": round(float(best), 4) if best is not None else None,
+            "diagnostic_only": True,
+        }
+    return {
+        "lanes": lanes,
+        "note": "Futures lanes reuse spot signal gross edge only as an economic proxy; they are not futures validation.",
+    }
+
+
 def discover_models(db_path: Path = DB_PATH) -> dict[str, Any]:
     raw = load_snapshots(db_path)
     result = {
@@ -366,6 +406,7 @@ def discover_models(db_path: Path = DB_PATH) -> dict[str, Any]:
     result["validated_horizons"] = list(VALIDATED_HORIZONS)
     result["consensus"] = consensus[:50]
     result["shadow_candidates"] = discover_shadow_models(raw) if SHADOW_ENABLED else []
+    result["economic_sensitivity"] = economic_sensitivity(result["shadow_candidates"])
     return result
 
 
