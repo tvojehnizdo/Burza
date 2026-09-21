@@ -94,6 +94,25 @@ class KrakenFutures:
     def open_orders(self) -> dict[str, Any]:
         return self.request("GET", "/api/v3/openorders")
 
+    def position_events(
+        self,
+        since: int | None = None,
+        before: int | None = None,
+        count: int = 100,
+        sort: str = "asc",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "count": int(count),
+            "sort": str(sort),
+            "trades": "true",
+        }
+        if since is not None:
+            params["since"] = int(since)
+        if before is not None:
+            params["before"] = int(before)
+        path = "/api/history/v3/positions"
+        return self._request_url("GET", path, path, params)
+
     def tickers(self) -> dict[str, Any]:
         r = self.s.get(BASE + "/derivatives/api/v3/tickers", timeout=20)
         r.raise_for_status()
