@@ -402,6 +402,14 @@ def private_plan() -> dict[str, Any]:
     }
 
 
+def _exit_limit_price(symbol: str, exit_side: str, trigger_price: float) -> float:
+    # Kraken Futures stop/take-profit examples use both stopPrice and limitPrice.
+    # Give the triggered reduce-only limit 10 bps of execution room.
+    if exit_side == "sell":
+        return round_price_to_tick(symbol, trigger_price * 0.999, mode="down")
+    return round_price_to_tick(symbol, trigger_price * 1.001, mode="up")
+
+
 def rescue_existing_position() -> dict[str, Any]:
     save_policy({
         "live_execution": True,
@@ -444,12 +452,16 @@ def rescue_existing_position() -> dict[str, Any]:
 
         stop = place_order(
             symbol, side, size, reduce_only=True, order_type="stp",
-            stop_price=stop_price, trigger_signal="mark",
+            stop_price=stop_price,
+            limit_price=_exit_limit_price(symbol, side, stop_price),
+            trigger_signal="mark",
             cli_ord_id=f"rs{int(time.time() * 1000)}",
         )
         take = place_order(
             symbol, side, size, reduce_only=True, order_type="take_profit",
-            stop_price=take_price, trigger_signal="mark",
+            stop_price=take_price,
+            limit_price=_exit_limit_price(symbol, side, take_price),
+            trigger_signal="mark",
             cli_ord_id=f"rt{int(time.time() * 1000)}",
         )
         if stop.get("submitted_live") and take.get("submitted_live"):
@@ -551,13 +563,15 @@ def execute() -> dict[str, Any]:
         if protected_size < min_lot(symbol):
             raise RuntimeError("Visible position is below supported protective-order size")
 
+        stop_trigger = float(candidate["stop_price"])
         stop = place_order(
             symbol,
             exit_side,
             protected_size,
             reduce_only=True,
             order_type="stp",
-            stop_price=float(candidate["stop_price"]),
+            stop_price=stop_trigger,
+            limit_price=_exit_limit_price(symbol, exit_side, stop_trigger),
             trigger_signal="mark",
             cli_ord_id=f"cs{int(time.time() * 1000)}",
             use_deadman=False,
@@ -565,13 +579,15 @@ def execute() -> dict[str, Any]:
         if not stop.get("submitted_live"):
             raise RuntimeError(f"Stop order not submitted: {stop}")
 
+        take_trigger = float(candidate["take_profit_price"])
         take = place_order(
             symbol,
             exit_side,
             protected_size,
             reduce_only=True,
             order_type="take_profit",
-            stop_price=float(candidate["take_profit_price"]),
+            stop_price=take_trigger,
+            limit_price=_exit_limit_price(symbol, exit_side, take_trigger),
             trigger_signal="mark",
             cli_ord_id=f"ct{int(time.time() * 1000)}",
             use_deadman=False,
@@ -594,6 +610,10 @@ def execute() -> dict[str, Any]:
     except Exception as exc:
         # If any protection step fails after an entry, flatten immediately.
         try:
+            try:
+                client.cancel_all_orders()
+            except Exception:
+                pass
             visible = _position_size(client, symbol)
             if abs(visible) >= min_lot(symbol):
                 close_side = "sell" if visible > 0 else "buy"
