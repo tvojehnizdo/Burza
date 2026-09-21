@@ -32,6 +32,7 @@ from fx_breakout import (
     arm_news_event as fx_arm_news_event,
     status as fx_breakout_status,
 )
+from fast_canary import scan as scan_fast_canary
 
 KRAKEN = "https://api.kraken.com"
 KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
@@ -618,6 +619,7 @@ small{color:#9aa9c7}
 <button onclick="go('/api/v4/models')">Alpha models</button>
 <button onclick="go('/api/v4/paper')">Paper ledger</button>
 <button onclick="go('/api/v4/executable-candidate')">Executable candidate</button>
+<button onclick="go('/api/v4/fast-canary')">Fast canary</button>
 <button onclick="go('/api/v4/relative-value')">Relative value</button>
 <button onclick="go('/api/v4/fx-breakout')">GBP/JPY Breakout Lab</button>
 <button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
@@ -716,6 +718,27 @@ def _pair_meta_by_wsname() -> dict[str, tuple[str, dict[str, Any]]]:
     return out
 
 
+@app.get("/api/v4/fast-canary")
+def v4_fast_canary():
+    readiness = _read_kraken_readiness()
+    balances = readiness.get("balance_nonzero") or {}
+    try:
+        return scan_fast_canary(
+            balances=balances,
+            max_pairs=40,
+            max_spread_bps=25.0,
+            maker_fee_bps_per_side=SPOT_MAKER_FEE_BPS,
+            execution_buffer_bps=4.0,
+            min_net_edge_bps=5.0,
+        )
+    except Exception as exc:
+        return {
+            "ready": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "actual_order_submitted": False,
+        }
+
+
 @app.get("/api/v4/executable-candidate")
 def v4_executable_candidate():
     models = ALPHA_RUNTIME.last_models or {}
@@ -724,11 +747,40 @@ def v4_executable_candidate():
         if bool(x.get("cost_positive"))
     ]
     if not candidates:
-        return {
-            "ready": False,
-            "reason": "NO_COST_POSITIVE_CANDIDATE",
-            "actual_order_submitted": False,
-        }
+        readiness = _read_kraken_readiness()
+        balances = readiness.get("balance_nonzero") or {}
+        try:
+            fast = scan_fast_canary(
+                balances=balances,
+                max_pairs=40,
+                max_spread_bps=25.0,
+                maker_fee_bps_per_side=SPOT_MAKER_FEE_BPS,
+                execution_buffer_bps=4.0,
+                min_net_edge_bps=5.0,
+            )
+            if fast.get("ready"):
+                return {
+                    "ready": True,
+                    "reason": "FAST_CANARY_READY",
+                    "candidate": fast.get("candidate"),
+                    "source": "FAST_CANARY_1M",
+                    "alternatives": fast.get("top", []),
+                    "manual_execution_required": True,
+                    "actual_order_submitted": False,
+                }
+            return {
+                "ready": False,
+                "reason": "NO_COST_POSITIVE_CANDIDATE",
+                "fast_canary": fast,
+                "actual_order_submitted": False,
+            }
+        except Exception as exc:
+            return {
+                "ready": False,
+                "reason": "NO_COST_POSITIVE_CANDIDATE",
+                "fast_canary_error": f"{type(exc).__name__}: {exc}",
+                "actual_order_submitted": False,
+            }
 
     latest = latest_rows()
     if latest.empty:
