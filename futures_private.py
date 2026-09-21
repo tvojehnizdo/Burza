@@ -308,7 +308,10 @@ def instrument_specs() -> dict[str, dict[str, Any]]:
 
 def instrument_spec(symbol: str) -> dict[str, Any]:
     s = str(symbol).upper()
-    spec = instrument_specs().get(s)
+    try:
+        spec = instrument_specs().get(s)
+    except Exception:
+        spec = None
     if spec:
         return spec
     root = _root(s)
