@@ -162,3 +162,32 @@ The Futures adapter arms cancelallordersafter (dead-man switch) before live Futu
 
 ### OpenAI key
 The local supervisor needs OPENAI_API_KEY. The launcher asks for it locally and can store it with Windows DPAPI. Never paste API keys into chat.
+
+
+## Live bridge
+
+The AI Supervisor process also starts a deterministic live bridge. It watches V4 PAPER signals and can mirror them to Kraken Spot/Margin only when BOTH of these are true:
+
+- the local execution policy has live_execution=true
+- the paper evidence gate has passed
+
+Default evidence gate:
+- at least 20 closed PAPER trades
+- net PAPER P/L >= 1 CZK
+- win rate >= 52%
+
+Until then, the bridge runs shadow/validate-only and will not submit a real order.
+
+Manual final activation:
+
+    .\arm_live.ps1
+
+This refuses to arm until the evidence gate passes and then requires typing ARM locally.
+
+Emergency stop:
+
+    .\disarm_live.ps1
+
+The AI Supervisor may DISARM live execution, lower leverage/risk, cancel orders and trigger a Futures dead-man switch. It may never arm LIVE itself.
+
+External withdrawals remain unavailable because the trading keys deliberately omit withdrawal/transfer access.
