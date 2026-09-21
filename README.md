@@ -235,3 +235,6 @@ Dashboard exposes a read-only executable-candidate gate that requires a current 
 
 ### Fast canary validation
 A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fallback executable candidate when learned microstructure has no cost-positive state. It remains read-only and never submits an order.
+
+### Fast canary diagnostics validation
+Dynamic Kraken ticker aliases are resolved in batches, USD/USDC routes are preserved separately, and fast-canary returns explicit rejection diagnostics instead of a silent zero scan.
