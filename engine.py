@@ -48,7 +48,7 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-ENGINE_BUILD = "4.3-relative-value-neutral"
+ENGINE_BUILD = "4.4-usdc-sequential-hunter"
 app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version=ENGINE_BUILD)
 RECORDER = KrakenMicroRecorder()
 ALPHA_RUNTIME = AlphaRuntime()
@@ -610,8 +610,8 @@ button{padding:11px 16px;margin:4px;border-radius:8px;border:0;cursor:pointer}
 pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px;min-height:220px}
 small{color:#9aa9c7}
 </style></head><body>
-<h1>IMPULSE MAX 5K — Kraken Pulse Hunter V4</h1>
-<p><b>PAPER / RESEARCH.</b> Live orders are disabled. V4 records Kraken L2 order book + taker trades, learns validated 30s/60s microstructure states and only then opens fixed-horizon PAPER signals.</p>
+<h1>IMPULSE MAX 5K — Kraken Pulse Hunter V4.4</h1>
+<p><b>SEQUENTIAL HUNTER / PAPER.</b> Dynamic USD/USDC universe, cost-positive filtering and manual executable-candidate gate. Live orders remain disabled until explicit execution.</p>
 <div>
 <button onclick="go('/api/v4/status')">V4 status</button>
 <button onclick="go('/api/v4/start','POST')">Start recorder + alpha</button>
