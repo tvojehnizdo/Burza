@@ -235,3 +235,6 @@ Dashboard exposes a read-only executable-candidate gate that requires a current 
 
 ### Fast canary validation
 A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fallback executable candidate when learned microstructure has no cost-positive state. It remains read-only and never submits an order.
+
+### Fast canary v2 validation
+Fast canary now evaluates 15-60 minute momentum/breakout moves and requires only positive post-cost edge (>1 bp) while keeping maker-cost gating.
