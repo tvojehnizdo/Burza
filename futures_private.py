@@ -9,6 +9,7 @@ import math
 import os
 import time
 import urllib.parse
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ POLICY_PATH = Path(os.getenv("FUTURES_POLICY", "data/futures_policy.json"))
 MIN_LOT_BY_ROOT = {
     "XBTUSD": 0.0001,
     "ETHUSD": 0.001,
+    "SOLUSD": 0.01,
+}
+
+FALLBACK_TICK_BY_ROOT = {
+    "XBTUSD": 1.0,
+    "ETHUSD": 0.1,
     "SOLUSD": 0.01,
 }
 
@@ -90,6 +97,11 @@ class KrakenFutures:
         r.raise_for_status()
         return r.json()
 
+    def instruments(self) -> dict[str, Any]:
+        r = self.s.get(BASE + "/derivatives/api/v3/instruments", timeout=20)
+        r.raise_for_status()
+        return r.json()
+
     def send_order(
         self,
         symbol: str,
@@ -122,6 +134,9 @@ class KrakenFutures:
     def deadman(self, timeout_s: int) -> dict[str, Any]:
         return self.request("POST", "/api/v3/cancelallordersafter", {"timeout": int(timeout_s)})
 
+    def cancel_all_orders(self) -> dict[str, Any]:
+        return self.request("POST", "/api/v3/cancelallorders", {})
+
 
 def load_policy() -> dict[str, Any]:
     p = dict(DEFAULT_POLICY)
@@ -135,10 +150,13 @@ def load_policy() -> dict[str, Any]:
     p["max_order_notional_usd"] = min(max(float(p.get("max_order_notional_usd", 15.0)), 1.0), 100.0)
     p["max_open_positions"] = min(max(int(p.get("max_open_positions", 2)), 1), 4)
     p["deadman_timeout_s"] = min(max(int(p.get("deadman_timeout_s", 60)), 20), 120)
-    allowed = p.get("allowed_roots") or DEFAULT_POLICY["allowed_roots"]
-    p["allowed_roots"] = [str(x).upper() for x in allowed if str(x).upper() in MIN_LOT_BY_ROOT]
-    if not p["allowed_roots"]:
-        p["allowed_roots"] = list(DEFAULT_POLICY["allowed_roots"])
+    allowed = [str(x).upper() for x in (p.get("allowed_roots") or DEFAULT_POLICY["allowed_roots"])]
+    if "*" in allowed:
+        p["allowed_roots"] = ["*"]
+    else:
+        p["allowed_roots"] = [x for x in allowed if x]
+        if not p["allowed_roots"]:
+            p["allowed_roots"] = list(DEFAULT_POLICY["allowed_roots"])
     p["require_transfer_no_access"] = True
     return p
 
@@ -245,11 +263,90 @@ def _mid_price(ticker: dict[str, Any] | None) -> float | None:
     return None
 
 
+@lru_cache(maxsize=1)
+def instrument_specs() -> dict[str, dict[str, Any]]:
+    s = requests.Session()
+    s.headers.update({"User-Agent": "ImpulseMax5K-Futures/2.1"})
+    r = s.get(BASE + "/derivatives/api/v3/instruments", timeout=20)
+    r.raise_for_status()
+    body = r.json()
+    rows = body.get("instruments") or []
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        try:
+            precision = int(float(row.get("contractValueTradePrecision") or 0))
+        except Exception:
+            precision = 0
+        qty_step = 10.0 ** (-max(0, precision))
+        try:
+            tick = float(row.get("tickSize") or 0.0)
+        except Exception:
+            tick = 0.0
+        try:
+            contract_size = float(row.get("contractSize") or 1.0)
+        except Exception:
+            contract_size = 1.0
+        out[symbol] = {
+            "symbol": symbol,
+            "type": str(row.get("type") or ""),
+            "underlying": str(row.get("underlying") or ""),
+            "tradeable": bool(row.get("tradeable", False)),
+            "tick_size": tick,
+            "qty_step": qty_step,
+            "contract_size": contract_size,
+            "precision": precision,
+            "category": str(row.get("category") or ""),
+            "tags": row.get("tags") or [],
+        }
+    return out
+
+
+def instrument_spec(symbol: str) -> dict[str, Any]:
+    s = str(symbol).upper()
+    spec = instrument_specs().get(s)
+    if spec:
+        return spec
+    root = _root(s)
+    if root in MIN_LOT_BY_ROOT:
+        return {
+            "symbol": s,
+            "tradeable": True,
+            "tick_size": FALLBACK_TICK_BY_ROOT[root],
+            "qty_step": MIN_LOT_BY_ROOT[root],
+            "contract_size": 1.0,
+            "precision": max(0, len(str(MIN_LOT_BY_ROOT[root]).split(".")[1].rstrip("0")) if "." in str(MIN_LOT_BY_ROOT[root]) else 0),
+        }
+    raise RuntimeError(f"No Kraken instrument spec for {s}")
+
+
 def min_lot(symbol: str) -> float:
-    root = _root(symbol)
-    if root not in MIN_LOT_BY_ROOT:
-        raise RuntimeError(f"Unsupported live root for {symbol}")
-    return float(MIN_LOT_BY_ROOT[root])
+    return float(instrument_spec(symbol)["qty_step"])
+
+
+def tick_size(symbol: str) -> float:
+    tick = float(instrument_spec(symbol).get("tick_size") or 0.0)
+    if tick <= 0:
+        raise RuntimeError(f"No positive tick size for {symbol}")
+    return tick
+
+
+def round_price_to_tick(symbol: str, price: float, mode: str = "nearest") -> float:
+    tick = tick_size(symbol)
+    units = float(price) / tick
+    if mode == "down":
+        units = math.floor(units + 1e-12)
+    elif mode == "up":
+        units = math.ceil(units - 1e-12)
+    else:
+        units = round(units)
+    value = units * tick
+    decimals = max(0, len(str(tick).split(".")[1].rstrip("0")) if "." in str(tick) else 0)
+    return round(value, decimals)
 
 
 def round_size_down(symbol: str, size: float) -> float:
@@ -259,12 +356,15 @@ def round_size_down(symbol: str, size: float) -> float:
     decimals = max(0, len(str(step).split(".")[1].rstrip("0")) if "." in str(step) else 0)
     return round(rounded, decimals)
 
-
 def order_preflight(symbol: str, side: str, size: float, reduce_only: bool = False, client: KrakenFutures | None = None) -> dict[str, Any]:
     p = load_policy()
     s = str(symbol).upper()
     root = _root(s)
-    if root not in set(p["allowed_roots"]):
+    spec = instrument_spec(s)
+    if not s.startswith("PF_") or not bool(spec.get("tradeable")):
+        raise RuntimeError(f"{s} is not a tradeable perpetual Futures instrument")
+    allowed = set(p["allowed_roots"])
+    if "*" not in allowed and root not in allowed:
         raise RuntimeError(f"Symbol root {root} is outside live allow-list")
     if side not in {"buy", "sell"}:
         raise ValueError("side must be buy/sell")
@@ -387,7 +487,16 @@ def place_order(
         trigger_signal=trigger_signal,
         cli_ord_id=cli_ord_id,
     )
-    return {"submitted_live": True, "preflight": preflight, "result": result}
+    send_status = result.get("sendStatus") or {}
+    status = str(send_status.get("status") or "").strip()
+    accepted = status.lower() in {"placed", "filled"}
+    return {
+        "submitted_live": bool(accepted),
+        "request_sent": True,
+        "exchange_status": status,
+        "preflight": preflight,
+        "result": result,
+    }
 
 
 def main() -> None:
