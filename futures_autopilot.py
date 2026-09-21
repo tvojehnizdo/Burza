@@ -16,8 +16,6 @@ from futures_canary import (
     MAX_NOTIONAL_PCT_EQUITY,
     MAX_NOTIONAL_USD,
     _exit_limit_price,
-    execute,
-    private_plan,
 )
 from futures_private import (
     cancel_symbol_orders,
@@ -472,59 +470,6 @@ def _portfolio_snapshot(client: Any) -> dict[str, Any]:
         "positions": rows,
         "readiness": r,
     }
-
-
-def _maybe_auto_entry(client: Any, state: dict[str, Any]) -> dict[str, Any]:
-    snap = _portfolio_snapshot(client)
-    equity = float(snap["equity_usd"])
-    start_equity = state.get("session_start_equity")
-    if start_equity is None and equity > 0:
-        state["session_start_equity"] = equity
-        start_equity = equity
-
-    if start_equity and equity <= float(start_equity) * (1.0 - MAX_SESSION_DRAWDOWN_PCT / 100.0):
-        return {
-            "ok": False,
-            "reason": "SESSION_DRAWDOWN_CIRCUIT_BREAKER",
-            "equity_usd": equity,
-            "session_start_equity": start_equity,
-        }
-
-    if int(snap["open_position_count"]) >= MAX_OPEN_POSITIONS:
-        return {"ok": True, "reason": "POSITION_SLOTS_FULL"}
-
-    portfolio_cap = min(
-        MAX_PORTFOLIO_NOTIONAL_USD,
-        equity * MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY / 100.0,
-    )
-    if float(snap["portfolio_notional_usd"]) >= portfolio_cap - 1e-9:
-        return {
-            "ok": True,
-            "reason": "PORTFOLIO_NOTIONAL_FULL",
-            "portfolio_notional_usd": snap["portfolio_notional_usd"],
-            "portfolio_cap_usd": portfolio_cap,
-        }
-
-    plan = private_plan()
-    if not plan.get("ready"):
-        return {
-            "ok": True,
-            "reason": str(plan.get("reason") or "NO_ENTRY"),
-            "candidate": (plan.get("public_scan") or {}).get("candidate"),
-        }
-
-    result = execute()
-    if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
-        state["stats"]["auto_entries"] = int(state["stats"].get("auto_entries", 0)) + 1
-        symbol = str((result.get("candidate") or {}).get("symbol") or "").upper()
-        _adopt_positions(client, state, client.open_positions(), client.open_orders())
-        _log({"event": "AUTO_ENTRY", "symbol": symbol, "result": result})
-        return {"ok": True, "reason": "AUTO_ENTRY_OPENED", "symbol": symbol}
-
-    if result.get("reason") == "FUTURES_CANARY_ABORTED":
-        state["stats"]["execution_aborts"] = int(state["stats"].get("execution_aborts", 0)) + 1
-    _log({"event": "AUTO_ENTRY_SKIPPED_OR_ABORTED", "result": result})
-    return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
 
 
 def run_forever() -> None:
