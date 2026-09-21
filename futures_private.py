@@ -139,6 +139,16 @@ class KrakenFutures:
     def cancel_all_orders(self) -> dict[str, Any]:
         return self.request("POST", "/api/v3/cancelallorders", {})
 
+    def cancel_order(self, order_id: str | None = None, cli_ord_id: str | None = None) -> dict[str, Any]:
+        if not order_id and not cli_ord_id:
+            raise ValueError("cancel_order requires order_id or cli_ord_id")
+        payload: dict[str, Any] = {}
+        if order_id:
+            payload["order_id"] = str(order_id)
+        if cli_ord_id:
+            payload["cliOrdId"] = str(cli_ord_id)
+        return self.request("POST", "/api/v3/cancelorder", payload)
+
 
 def load_policy() -> dict[str, Any]:
     p = dict(DEFAULT_POLICY)
@@ -197,6 +207,52 @@ def _root(symbol: str) -> str | None:
 def _position_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = payload.get("openPositions") or []
     return [x for x in rows if isinstance(x, dict)]
+
+
+def open_order_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = payload.get("openOrders") or []
+    return [x for x in rows if isinstance(x, dict)]
+
+
+def cancel_symbol_orders(
+    client: KrakenFutures,
+    symbol: str,
+    reduce_only_only: bool = True,
+) -> list[dict[str, Any]]:
+    target = str(symbol).upper()
+    results: list[dict[str, Any]] = []
+    for row in open_order_rows(client.open_orders()):
+        row_symbol = str(row.get("symbol") or row.get("tradeable") or "").upper()
+        if row_symbol != target:
+            continue
+        if reduce_only_only and not bool(row.get("reduceOnly", False)):
+            continue
+        order_id = str(row.get("order_id") or row.get("orderId") or "").strip()
+        cli_id = str(row.get("cliOrdId") or "").strip()
+        try:
+            if order_id:
+                result = client.cancel_order(order_id=order_id)
+            elif cli_id:
+                result = client.cancel_order(cli_ord_id=cli_id)
+            else:
+                results.append({"ok": False, "reason": "missing_order_identifier", "row": row})
+                continue
+            status = str((result.get("cancelStatus") or {}).get("status") or "").lower()
+            results.append({
+                "ok": status in {"cancelled", "notfound"},
+                "status": status,
+                "order_id": order_id or None,
+                "cliOrdId": cli_id or None,
+                "result": result,
+            })
+        except Exception as exc:
+            results.append({
+                "ok": False,
+                "order_id": order_id or None,
+                "cliOrdId": cli_id or None,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return results
 
 
 def position_map(payload: dict[str, Any]) -> dict[str, float]:
