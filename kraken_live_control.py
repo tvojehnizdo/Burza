@@ -113,6 +113,7 @@ def place_spot_margin_order(
     leverage: int = 1,
     ordertype: str = "market",
     force_validate: bool = False,
+    reduce_only: bool = False,
 ) -> dict[str, Any]:
     policy = load_policy()
     if side not in {"buy", "sell"}:
@@ -152,6 +153,8 @@ def place_spot_margin_order(
     }
     if leverage > 1:
         payload["leverage"] = str(leverage)
+    if reduce_only:
+        payload["reduce_only"] = "true"
 
     result = client.private("AddOrder", payload)
     return {
@@ -162,6 +165,7 @@ def place_spot_margin_order(
         "volume": volume,
         "leverage": leverage,
         "estimated_notional_quote": estimated_notional,
+        "reduce_only": reduce_only,
         "result": result,
         "withdrawal_capability": False,
         "wallet_transfer_capability": False,
