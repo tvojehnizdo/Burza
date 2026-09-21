@@ -86,7 +86,7 @@ def parse_env_tolerant(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]
     patterns = [
         re.compile(r"^\s*\$env:([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.+?)\s*$", re.I),
         re.compile(r"^\s*(?:export\s+|set\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.+?)\s*$", re.I),
-        re.compile(r"^\s*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*:\s*(.+?)\s*$", re.I),
+        re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(.+?)\s*$", re.I),
     ]
 
     for lineno, raw in enumerate(text.splitlines(), 1):
