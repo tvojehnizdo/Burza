@@ -138,3 +138,29 @@ def scan_pairs(symbols: list[str]) -> dict[str, Any]:
             "lookback_minutes": PAIR_LOOKBACK,
         },
     }
+
+
+def selftest() -> dict[str, Any]:
+    a = pd.Series([100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110], dtype=float)
+    b = pd.Series([200, 198, 196, 194, 192, 190, 188, 186, 184, 182, 180], dtype=float)
+    c = pd.Series([50, 50.5, 51, 51.5, 52, 52.5, 53, 53.5, 54, 54.5, 55], dtype=float)
+
+    corr_inv = _corr(a, b)
+    corr_pos = _corr(a, c)
+
+    checks = {
+        "negative_corr_detected": corr_inv < 0,
+        "positive_corr_detected": corr_pos > 0,
+        "thresholds_sane": (
+            NEG_CORR_MAX < 0
+            and POS_CORR_MIN > 0
+            and MIN_PAIR_MOMENTUM_BPS > 0
+            and MIN_RV_ZSCORE > 0
+        ),
+    }
+    return {"ok": all(checks.values()), "checks": checks}
+
+
+if __name__ == "__main__":
+    import json
+    print(json.dumps(selftest(), indent=2))
