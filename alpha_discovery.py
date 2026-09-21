@@ -17,6 +17,7 @@ from microstructure import DB_PATH, connect_db, get_meta, init_db, now_ms, set_m
 START_CAPITAL = float(os.getenv("START_CAPITAL", "5000"))
 MAX_DD_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "10"))
 ALPHA_INTERVAL_S = int(os.getenv("ALPHA_INTERVAL_S", "30"))
+ALPHA_MODEL_REFRESH_S = int(os.getenv("ALPHA_MODEL_REFRESH_S", "30"))
 EXECUTION_MODE = os.getenv("V4_EXECUTION_MODE", "market_taker").strip().lower()
 KRAKEN_MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))
 KRAKEN_TAKER_FEE_BPS = float(os.getenv("KRAKEN_TAKER_BPS", "80"))
@@ -47,7 +48,11 @@ SHADOW_MIN_GROSS_BPS = float(os.getenv("SHADOW_MIN_GROSS_BPS", "0.25"))
 SHADOW_MIN_HIT = float(os.getenv("SHADOW_MIN_HIT", "0.48"))
 SHADOW_MIN_NET_BPS = float(os.getenv("SHADOW_MIN_NET_BPS", "0.0"))
 SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", "8"))
+SHADOW_MAX_PER_SYMBOL = int(os.getenv("SHADOW_MAX_PER_SYMBOL", "2"))
+SHADOW_REENTRY_COOLDOWN_S = float(os.getenv("SHADOW_REENTRY_COOLDOWN_S", "5"))
+SHADOW_ALLOW_UNVALIDATED = os.getenv("SHADOW_ALLOW_UNVALIDATED", "0").strip().lower() not in {"0", "false", "no", "off"}
 SHADOW_ALLOC_PCT = float(os.getenv("SHADOW_ALLOC_PCT", "12.5")) / 100.0
+SHADOW_UNVALIDATED_ALLOC_PCT = float(os.getenv("SHADOW_UNVALIDATED_ALLOC_PCT", "2.5")) / 100.0
 SHADOW_MAX_DD_PCT = float(os.getenv("SHADOW_MAX_DRAWDOWN_PCT", "35"))
 SHADOW_HORIZONS = tuple(
     int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "30,60,120,300,600,900").split(",") if x.strip()
@@ -638,6 +643,12 @@ def resolve_shadow_paper(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
 
 
 def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    """Open isolated SHADOW trades at high cadence without touching LIVE.
+
+    In aggressive discovery mode, explicitly unvalidated candidates may be
+    sampled as exploration trades. They remain isolated from validated PAPER
+    and never count toward the LIVE gate.
+    """
     if not SHADOW_ENABLED:
         return []
     candidates_raw = models.get("shadow_candidates", [])
@@ -651,38 +662,77 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
 
     with connect_db(db_path) as con:
         open_rows = con.execute(
-            "SELECT symbol FROM shadow_paper_trades WHERE status='OPEN'"
+            """SELECT symbol,state_key,side,horizon_s
+               FROM shadow_paper_trades WHERE status='OPEN'"""
         ).fetchall()
-    open_symbols = {r[0] for r in open_rows}
-    slots = max(0, SHADOW_MAX_OPEN - len(open_symbols))
+        recent_rows = con.execute(
+            """SELECT symbol,state_key,side,horizon_s,MAX(opened_ms)
+               FROM shadow_paper_trades
+               GROUP BY symbol,state_key,side,horizon_s"""
+        ).fetchall()
+
+    open_keys = {(r[0], r[1], r[2], int(r[3])) for r in open_rows}
+    open_per_symbol: dict[str, int] = {}
+    for r in open_rows:
+        open_per_symbol[r[0]] = open_per_symbol.get(r[0], 0) + 1
+    last_open_ms = {(r[0], r[1], r[2], int(r[3])): int(r[4]) for r in recent_rows if r[4] is not None}
+
+    slots = max(0, SHADOW_MAX_OPEN - len(open_rows))
     if slots <= 0:
         return []
 
     by_state: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for model in candidates_raw:
-        by_state.setdefault((model["symbol"], model["state_key"]), []).append(model)
+        if bool(model.get("cost_positive")) or SHADOW_ALLOW_UNVALIDATED:
+            by_state.setdefault((model["symbol"], model["state_key"]), []).append(model)
 
     latest = latest_rows(db_path)
     t = now_ms()
-    matches: list[tuple[float, dict[str, Any], Any]] = []
+    matches: list[tuple[tuple[int, float, float], dict[str, Any], Any]] = []
+    cooldown_ms = int(SHADOW_REENTRY_COOLDOWN_S * 1000.0)
+
     for _, row in latest.iterrows():
-        if row.symbol in open_symbols or t - int(row.ts_ms) > 5_000:
+        if t - int(row.ts_ms) > 5_000:
             continue
         if float(row.spread_bps) > ALPHA_MAX_SPREAD_BPS:
             continue
-        options = [
-            z for z in by_state.get((row.symbol, row.state_key), [])
-            if bool(z.get("cost_positive"))
-        ]
-        if not options:
+        if open_per_symbol.get(row.symbol, 0) >= SHADOW_MAX_PER_SYMBOL:
             continue
-        model = max(options, key=lambda z: (z["score"], z["net_edge_proxy_bps"]))
-        matches.append((model["score"], model, row))
+
+        options = by_state.get((row.symbol, row.state_key), [])
+        for model in options:
+            key = (row.symbol, row.state_key, model["side"], int(model["horizon_s"]))
+            if key in open_keys:
+                continue
+            prev_ms = last_open_ms.get(key)
+            if prev_ms is not None and t - prev_ms < cooldown_ms:
+                continue
+            is_cost_positive = bool(model.get("cost_positive"))
+            priority = (
+                1 if is_cost_positive else 0,
+                float(model.get("score", 0.0)),
+                float(model.get("net_edge_proxy_bps", model.get("gross_edge_bps", 0.0))),
+            )
+            matches.append((priority, model, row))
+
     matches.sort(key=lambda z: z[0], reverse=True)
 
     opened: list[dict[str, Any]] = []
-    notional = max(0.0, min(eq * SHADOW_ALLOC_PCT, eq))
-    for _, model, row in matches[:slots]:
+    for _, model, row in matches:
+        if len(opened) >= slots:
+            break
+        if open_per_symbol.get(row.symbol, 0) >= SHADOW_MAX_PER_SYMBOL:
+            continue
+
+        key = (row.symbol, row.state_key, model["side"], int(model["horizon_s"]))
+        if key in open_keys:
+            continue
+
+        is_cost_positive = bool(model.get("cost_positive"))
+        alloc_pct = SHADOW_ALLOC_PCT if is_cost_positive else SHADOW_UNVALIDATED_ALLOC_PCT
+        notional = max(0.0, min(eq * alloc_pct, eq))
+        signal_kind = "COST_POSITIVE_SHADOW" if is_cost_positive else "UNVALIDATED_STATE"
+
         with connect_db(db_path) as con:
             cur = con.execute(
                 """INSERT INTO shadow_paper_trades(
@@ -692,10 +742,14 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
                 (
                     t, row.symbol, model["side"], model["horizon_s"], float(row.mid), notional,
                     model["gross_edge_bps"], model["score"], ALPHA_COST_BPS,
-                    row.state_key, "COST_POSITIVE_SHADOW",
+                    row.state_key, signal_kind,
                 ),
             )
             trade_id = cur.lastrowid
+
+        open_keys.add(key)
+        open_per_symbol[row.symbol] = open_per_symbol.get(row.symbol, 0) + 1
+        last_open_ms[key] = t
         opened.append({
             "id": trade_id, "symbol": row.symbol, "side": model["side"],
             "horizon_s": model["horizon_s"], "entry": float(row.mid),
@@ -703,6 +757,7 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
             "gross_edge_bps": model["gross_edge_bps"],
             "net_edge_proxy_bps": model["net_edge_proxy_bps"],
             "score": model["score"], "state_key": row.state_key,
+            "signal_kind": signal_kind,
             "validation_level": model["validation_level"],
         })
     return opened
@@ -814,6 +869,7 @@ class AlphaRuntime:
         self.last_models: dict[str, Any] | None = None
         self.last_error: str | None = None
         self.last_cycle_ms: int | None = None
+        self.last_model_refresh_ms: int | None = None
 
     def start(self) -> bool:
         if self.thread and self.thread.is_alive():
@@ -832,7 +888,19 @@ class AlphaRuntime:
                 closed = resolve_paper(self.db_path)
                 shadow_closed = resolve_shadow_paper(self.db_path)
                 scenario_closed = resolve_scenario_paper(self.db_path)
-                models = discover_models(self.db_path)
+                cycle_now = now_ms()
+                refresh_models = (
+                    self.last_models is None
+                    or self.last_model_refresh_ms is None
+                    or cycle_now - self.last_model_refresh_ms >= ALPHA_MODEL_REFRESH_S * 1000
+                )
+                if refresh_models:
+                    models = discover_models(self.db_path)
+                    self.last_models = models
+                    self.last_model_refresh_ms = now_ms()
+                else:
+                    models = self.last_models
+
                 opened = maybe_open_paper(models, self.db_path)
                 shadow_opened = maybe_open_shadow_paper(models, self.db_path)
                 scenario_opened = maybe_open_scenario_paper(models, self.db_path)
@@ -843,6 +911,8 @@ class AlphaRuntime:
                     "rows": models["rows"],
                     "consensus_count": len(models["consensus"]),
                     "shadow_candidate_count": len(models.get("shadow_candidates", [])),
+                    "models_refreshed": refresh_models,
+                    "model_refresh_ms": self.last_model_refresh_ms,
                     "opened": opened,
                     "closed": closed,
                     "shadow_opened": shadow_opened,
@@ -909,6 +979,9 @@ class AlphaRuntime:
         return {
             "running": bool(self.thread and self.thread.is_alive() and not self._stop.is_set()),
             "last_cycle_ms": self.last_cycle_ms,
+            "last_model_refresh_ms": self.last_model_refresh_ms,
+            "decision_interval_s": ALPHA_INTERVAL_S,
+            "model_refresh_s": ALPHA_MODEL_REFRESH_S,
             "last_error": self.last_error,
             "rows": rows,
             "paper_equity": round(paper_equity(self.db_path), 2),
@@ -926,6 +999,11 @@ class AlphaRuntime:
                     sum(1 for x in self.last_models.get("shadow_candidates", []) if x.get("cost_positive"))
                     if self.last_models else 0
                 ),
+                "allow_unvalidated": SHADOW_ALLOW_UNVALIDATED,
+                "max_open": SHADOW_MAX_OPEN,
+                "max_per_symbol": SHADOW_MAX_PER_SYMBOL,
+                "reentry_cooldown_s": SHADOW_REENTRY_COOLDOWN_S,
+                "horizons": list(SHADOW_HORIZONS),
                 "recent": recent_shadow,
                 "counts_for_live_gate": False,
             },
