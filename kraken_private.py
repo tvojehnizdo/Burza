@@ -6,13 +6,13 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import dotenv_values, load_dotenv
 
 API = "https://api.kraken.com"
 
@@ -62,35 +62,166 @@ class KrakenPrivate:
         return body.get("result", {})
 
 
+def _unquote(value: str) -> str:
+    v = value.strip().rstrip(",").strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in {"'", '"'}:
+        v = v[1:-1]
+    return v.strip()
+
+
+def parse_env_tolerant(path: Path) -> tuple[dict[str, str], list[dict[str, Any]], list[tuple[int, str]]]:
+    """Parse common .env / PowerShell / YAML-ish assignment formats.
+
+    Returns values, assignment metadata and Kraken-context lines. Secret values
+    are never logged by callers.
+    """
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    values: dict[str, str] = {}
+    entries: list[dict[str, Any]] = []
+    context: list[tuple[int, str]] = []
+
+    patterns = [
+        re.compile(r"^\\s*\\$env:([A-Za-z_][A-Za-z0-9_.-]*)\\s*=\\s*(.+?)\\s*$", re.I),
+        re.compile(r"^\\s*(?:export\\s+|set\\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\\s*=\\s*(.+?)\\s*$", re.I),
+        re.compile(r"^\\s*[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\\s*:\\s*(.+?)\\s*$", re.I),
+    ]
+
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.strip()
+        if "KRAKEN" in stripped.upper():
+            context.append((lineno, stripped[:160]))
+        if not stripped or stripped.startswith("#") or stripped.startswith(";"):
+            continue
+        matched = None
+        for pat in patterns:
+            m = pat.match(raw)
+            if m:
+                matched = m
+                break
+        if not matched:
+            continue
+        name = matched.group(1).strip()
+        value = _unquote(matched.group(2))
+        if not value or value.lower() in {"null", "none"}:
+            continue
+        values[name] = value
+        entries.append({"name": name, "line": lineno})
+
+    return values, entries, context
+
+
+def _is_secret_name(name: str) -> bool:
+    u = name.upper()
+    return "SECRET" in u or "PRIVATE" in u
+
+
+def _is_key_name(name: str) -> bool:
+    u = name.upper()
+    return ("KEY" in u or "PUBLIC" in u) and not _is_secret_name(name)
+
+
+def _pick_by_context(values: dict[str, str], entries: list[dict[str, Any]], context: list[tuple[int, str]]) -> tuple[str | None, str | None]:
+    # Prefer variables explicitly named for Kraken.
+    kraken_keys = [e["name"] for e in entries if "KRAKEN" in e["name"].upper() and _is_key_name(e["name"])]
+    kraken_secrets = [e["name"] for e in entries if "KRAKEN" in e["name"].upper() and _is_secret_name(e["name"])]
+    if len(set(kraken_keys)) == 1 and len(set(kraken_secrets)) == 1:
+        return kraken_keys[0], kraken_secrets[0]
+
+    # Support vaults that use a Kraken heading followed by generic API_KEY /
+    # API_SECRET variables. Only consider a tight local window.
+    kraken_lines = [line for line, _ in context]
+    near = []
+    for e in entries:
+        if any(abs(int(e["line"]) - line) <= 10 for line in kraken_lines):
+            near.append(e["name"])
+    near_keys = [n for n in near if _is_key_name(n)]
+    near_secrets = [n for n in near if _is_secret_name(n)]
+    if len(set(near_keys)) == 1 and len(set(near_secrets)) == 1:
+        return near_keys[0], near_secrets[0]
+
+    return None, None
+
+
+def inspect_env_file(env_file: str) -> dict[str, Any]:
+    path = Path(env_file)
+    if not path.exists():
+        raise FileNotFoundError(f"Env file not found: {path}")
+    values, entries, context = parse_env_tolerant(path)
+    key_name, secret_name = _pick_by_context(values, entries, context)
+    # Sanitized diagnostic: names/line numbers only, never values.
+    return {
+        "file": str(path),
+        "assignment_count": len(entries),
+        "kraken_context_lines": [line for line, _ in context],
+        "candidate_variable_names": [e["name"] for e in entries if "KRAKEN" in e["name"].upper()],
+        "selected_key_var": key_name,
+        "selected_secret_var": secret_name,
+        "values_printed": False,
+    }
+
+
 def load_kraken_credentials(env_file: str | None = None) -> tuple[str, str, dict[str, Any]]:
     source = None
+    parsed: dict[str, str] = {}
+    entries: list[dict[str, Any]] = []
+    context: list[tuple[int, str]] = []
+
     if env_file:
         path = Path(env_file)
         if not path.exists():
             raise FileNotFoundError(f"Env file not found: {path}")
-        load_dotenv(path, override=False)
+        parsed, entries, context = parse_env_tolerant(path)
         source = str(path)
+
+    env = dict(os.environ)
+    env.update(parsed)
 
     pairs = [
         ("KRAKEN_API_KEY", "KRAKEN_API_SECRET"),
         ("KRAKEN_KEY", "KRAKEN_SECRET"),
         ("KRAKEN_PUBLIC_KEY", "KRAKEN_PRIVATE_KEY"),
         ("API_KEY_KRAKEN", "API_SECRET_KRAKEN"),
+        ("KRAKEN_APIKEY", "KRAKEN_APISECRET"),
     ]
     for k, s in pairs:
-        if os.getenv(k) and os.getenv(s):
-            return os.environ[k], os.environ[s], {"source": source or "environment", "key_var": k, "secret_var": s}
+        if env.get(k) and env.get(s):
+            return str(env[k]), str(env[s]), {
+                "source": source or "environment",
+                "key_var": k,
+                "secret_var": s,
+                "parser": "tolerant",
+            }
 
-    # Fallback: inspect variable names only, never values.
-    env = dict(os.environ)
-    if env_file:
-        env.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
-    key_names = [k for k in env if "KRAKEN" in k.upper() and ("KEY" in k.upper() or "PUBLIC" in k.upper()) and "SECRET" not in k.upper() and "PRIVATE" not in k.upper()]
-    secret_names = [k for k in env if "KRAKEN" in k.upper() and ("SECRET" in k.upper() or "PRIVATE" in k.upper())]
-    if len(key_names) == 1 and len(secret_names) == 1:
-        return str(env[key_names[0]]), str(env[secret_names[0]]), {"source": source or "environment", "key_var": key_names[0], "secret_var": secret_names[0]}
+    key_name, secret_name = _pick_by_context(env, entries, context)
+    if key_name and secret_name and env.get(key_name) and env.get(secret_name):
+        return str(env[key_name]), str(env[secret_name]), {
+            "source": source or "environment",
+            "key_var": key_name,
+            "secret_var": secret_name,
+            "parser": "tolerant-context",
+        }
 
-    raise RuntimeError("Kraken API credentials not found. Expected KRAKEN_API_KEY/KRAKEN_API_SECRET or an equivalent unambiguous Kraken key/secret pair.")
+    # Last safe fallback: unambiguous Kraken-labelled environment variables.
+    key_names = [k for k in env if "KRAKEN" in k.upper() and _is_key_name(k)]
+    secret_names = [k for k in env if "KRAKEN" in k.upper() and _is_secret_name(k)]
+    if len(set(key_names)) == 1 and len(set(secret_names)) == 1:
+        k, s = key_names[0], secret_names[0]
+        return str(env[k]), str(env[s]), {
+            "source": source or "environment",
+            "key_var": k,
+            "secret_var": s,
+            "parser": "tolerant-name-inference",
+        }
+
+    diag = inspect_env_file(env_file) if env_file else {
+        "candidate_variable_names": [],
+        "kraken_context_lines": [],
+        "values_printed": False,
+    }
+    raise RuntimeError(
+        "Kraken API credentials not found after tolerant parsing. "
+        f"Sanitized diagnostic: {json.dumps(diag, ensure_ascii=False)}"
+    )
 
 
 def compact_balances(balance: dict[str, Any]) -> dict[str, float]:
@@ -239,7 +370,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Kraken private API readiness check. Never submits a live order.")
     ap.add_argument("--env-file", default=os.getenv("KRAKEN_ENV_FILE"))
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--inspect-env", action="store_true", help="Print sanitized variable-name diagnostics only.")
     args = ap.parse_args()
+    if args.inspect_env:
+        if not args.env_file:
+            raise SystemExit("--inspect-env requires --env-file")
+        print(json.dumps(inspect_env_file(args.env_file), indent=2, default=str))
+        return
     result = readiness(args.env_file)
     print(json.dumps(result, indent=2, default=str))
     if not result["safe_to_arm"]:
