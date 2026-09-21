@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from live_bridge import BRIDGE
 from kraken_live_control import (
     account_snapshot,
     cancel_all_orders,
@@ -250,6 +251,7 @@ LOOP = SupervisorLoop()
 
 @app.on_event("startup")
 def startup():
+    BRIDGE.start()
     if AUTO:
         LOOP.start()
 
@@ -282,6 +284,7 @@ def status():
         "loop_running": bool(LOOP.thread and LOOP.thread.is_alive()),
         "loop_error": LOOP.error,
         "policy": load_policy(),
+        "live_bridge": BRIDGE.status(),
         "context": system_context(),
     }
 
