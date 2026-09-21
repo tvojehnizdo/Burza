@@ -25,7 +25,7 @@ from futures_private import (
     save_policy,
 )
 
-MAX_UNIVERSE = 24
+MAX_UNIVERSE = 32
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
 # Tier-1 Futures taker fee 5 bps/side + conservative 2 bps slippage
@@ -37,9 +37,12 @@ ROUND_TRIP_TAKER_COST_BPS = 2.0 * (
     TAKER_FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE + EXEC_BUFFER_BPS_PER_SIDE
 )
 MIN_TAKER_NET_EDGE_BPS = 5.0
+TARGET_NOTIONAL_USD = 2.25
 MAX_NOTIONAL_USD = 3.0
 MAX_NOTIONAL_PCT_EQUITY = 35.0
-MAX_OPEN_POSITIONS = 1
+MAX_OPEN_POSITIONS = 4
+MAX_PORTFOLIO_NOTIONAL_USD = 10.0
+MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY = 50.0
 CHARTS = "https://futures.kraken.com/api/charts/v1"
 
 
@@ -269,6 +272,8 @@ def private_plan() -> dict[str, Any]:
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
         "max_order_notional_usd": MAX_NOTIONAL_USD,
         "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
+        "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         "allowed_roots": ["*"],
     })
     scan = public_scan()
@@ -282,10 +287,11 @@ def private_plan() -> dict[str, Any]:
             "readiness": r,
             "actual_order_submitted": False,
         }
-    if int(r.get("open_position_count") or 0) != 0:
+    open_count = int(r.get("open_position_count") or 0)
+    if open_count >= MAX_OPEN_POSITIONS:
         return {
             "ready": False,
-            "reason": "EXISTING_FUTURES_POSITION",
+            "reason": "POSITION_SLOTS_FULL",
             "public_scan": scan,
             "readiness": r,
             "actual_order_submitted": False,
@@ -304,6 +310,8 @@ def private_plan() -> dict[str, Any]:
 
     candidates = [x for x in scan.get("all", []) if x.get("canary_signal_ready")]
     client = client_from_env()
+    open_symbols = set(position_map(client.open_positions()).keys())
+    candidates = [x for x in candidates if str(x.get("symbol") or "").upper() not in open_symbols]
     executable: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
@@ -311,9 +319,13 @@ def private_plan() -> dict[str, Any]:
         symbol = str(p["symbol"]).upper()
         px = _ticker_mid(client, symbol)
         csize = contract_size(symbol)
-        raw_size = notional_cap / (px * csize)
-        size = round_size_down(symbol, raw_size)
         minimum = min_lot(symbol)
+        minimum_notional = minimum * px * csize
+        desired_notional = min(MAX_NOTIONAL_USD, max(TARGET_NOTIONAL_USD, minimum_notional))
+        raw_size = desired_notional / (px * csize)
+        size = round_size_down(symbol, raw_size)
+        if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
+            size = minimum
         if size < minimum:
             rejected.append({
                 "symbol": symbol,
@@ -347,8 +359,9 @@ def private_plan() -> dict[str, Any]:
             continue
 
         atr_frac = max(float(p.get("atr_pct") or 0.0) / 100.0, 0.0001)
-        stop_frac = min(max(1.8 * atr_frac, 0.0035), 0.0120)
-        take_frac = min(max(2.0 * stop_frac, 0.0060), 0.0250)
+        expected_frac = max(float(p.get("expected_move_proxy_bps") or 0.0) / 10000.0, 0.0)
+        stop_frac = min(max(1.5 * atr_frac, 0.0035), 0.0080)
+        take_frac = min(max(1.25 * stop_frac, 1.10 * expected_frac, 0.0045), 0.0120)
 
         if side == "buy":
             stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
@@ -399,6 +412,8 @@ def private_plan() -> dict[str, Any]:
             "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
             "max_order_notional_usd": MAX_NOTIONAL_USD,
             "max_open_positions": MAX_OPEN_POSITIONS,
+            "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
+            "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         },
         "actual_order_submitted": False,
     }
@@ -418,6 +433,8 @@ def rescue_existing_position() -> dict[str, Any]:
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
         "max_order_notional_usd": MAX_NOTIONAL_USD,
         "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
+        "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         "allowed_roots": ["*"],
     })
     client = client_from_env()
@@ -426,10 +443,17 @@ def rescue_existing_position() -> dict[str, Any]:
         active = [(s, float(q)) for s, q in positions.items() if abs(float(q)) >= min_lot(s)]
         if not active:
             return {"ok": True, "reason": "NO_EXISTING_POSITION", "actual_order_submitted": False}
-        if len(active) != 1:
+        if len(active) > MAX_OPEN_POSITIONS:
             return {
                 "ok": False,
-                "reason": "MULTIPLE_EXISTING_POSITIONS",
+                "reason": "TOO_MANY_EXISTING_POSITIONS",
+                "positions": active,
+                "actual_order_submitted": False,
+            }
+        if len(active) > 1:
+            return {
+                "ok": True,
+                "reason": "EXISTING_PORTFOLIO_PRESERVED",
                 "positions": active,
                 "actual_order_submitted": False,
             }
@@ -508,6 +532,8 @@ def execute() -> dict[str, Any]:
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
         "max_order_notional_usd": MAX_NOTIONAL_USD,
         "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
+        "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         "allowed_roots": ["*"],
     })
 
