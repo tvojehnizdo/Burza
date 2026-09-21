@@ -241,3 +241,6 @@ A standalone Kraken Futures canary scans BTC/ETH/SOL using 1-minute derivatives 
 
 ### Final live futures validation v2
 Validates the final dynamic PF_*USD live implementation with Kraken contract size, tick/quantity precision, rescue, accepted sendStatus checks, trigger+limit protection, and PowerShell launcher parsing.
+
+### Four-slot micro futures portfolio validation
+Validates the four-slot micro futures portfolio, total exposure cap, dynamic PF_*USD universe, faster protected profit targets, stale-order symbol blocking, and the per-entry-confirmation launcher.
