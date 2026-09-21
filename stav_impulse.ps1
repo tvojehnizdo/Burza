@@ -254,6 +254,7 @@ $report = [ordered]@{
         allow_new_entries = Get-Prop (Get-Prop $rvLive "policy") "allow_new_entries" $false
         target_notional_usd_per_leg = Get-Prop (Get-Prop $rvLive "policy") "target_notional_usd_per_leg"
         evidence_gate = Get-Prop (Get-Prop $rvLive "evidence") "gate" $false
+        database = Get-Prop (Get-Prop $rvLive "evidence") "database"
         closed_pairs = Get-Prop (Get-Prop $rvLive "evidence") "closed_pairs" 0
         net_pnl_czk = Get-Prop (Get-Prop $rvLive "evidence") "net_pnl_czk"
         profit_factor = Get-Prop (Get-Prop $rvLive "evidence") "profit_factor"
@@ -331,6 +332,7 @@ $lines.Add("RV LIVE CANARY")
 $lines.Add("  armed:          $(Get-Prop (Get-Prop $rvLive 'policy') 'live_execution' $false)")
 $lines.Add("  new entries:    $(Get-Prop (Get-Prop $rvLive 'policy') 'allow_new_entries' $false)")
 $lines.Add("  evidence gate:  $(Get-Prop (Get-Prop $rvLive 'evidence') 'gate' $false)")
+$lines.Add("  database:       $(Get-Prop (Get-Prop $rvLive 'evidence') 'database')")
 $lines.Add("  closed pairs:   $(Get-Prop (Get-Prop $rvLive 'evidence') 'closed_pairs' 0)")
 $lines.Add("  net PnL CZK:    $(Fmt (Get-Prop (Get-Prop $rvLive 'evidence') 'net_pnl_czk'))")
 $lines.Add("  profit factor:  $(Fmt (Get-Prop (Get-Prop $rvLive 'evidence') 'profit_factor') 3)")
