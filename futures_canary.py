@@ -27,7 +27,7 @@ from futures_private import (
 )
 
 MAX_UNIVERSE = 20
-UNIVERSE_PREFILTER = 48
+UNIVERSE_PREFILTER = 32
 MAX_UNIVERSE_SPREAD_BPS = 30.0
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
@@ -101,6 +101,15 @@ def _signal(symbol: str) -> dict[str, Any]:
     ], axis=1).max(axis=1)
     atr = float(tr.tail(14).mean())
     atr_bps = atr / last * 10000.0 if last > 0 else 0.0
+    median_range = float((df["high"] - df["low"]).tail(30).median())
+    median_range_bps = median_range / last * 10000.0 if last > 0 else 0.0
+    realized = float(close.pct_change().dropna().tail(60).std(ddof=0))
+    realized_bps = realized * 10000.0 if math.isfinite(realized) else 0.0
+    volatility_score = (
+        atr_bps * 0.55
+        + median_range_bps * 0.30
+        + realized_bps * 0.15
+    )
 
     vol_med = float(df["volume"].tail(30).median())
     vol_ratio = float(df["volume"].iloc[-1] / vol_med) if vol_med > 0 else 1.0
@@ -149,6 +158,9 @@ def _signal(symbol: str) -> dict[str, Any]:
         "r60_bps": round(r60 * 10000.0, 3),
         "atr_pct": round(atr_bps / 100.0, 4),
         "atr_bps": round(atr_bps, 3),
+        "median_range_bps": round(median_range_bps, 3),
+        "realized_vol_bps": round(realized_bps, 3),
+        "volatility_score": round(volatility_score, 3),
         "volume_ratio": round(vol_ratio, 3),
         "expected_move_proxy_bps": round(expected_bps, 3),
         "taker_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
@@ -157,51 +169,13 @@ def _signal(symbol: str) -> dict[str, Any]:
     }
 
 
-def _volatility_profile(symbol: str) -> dict[str, float]:
-    df = _candles(symbol, 90)
-    if len(df) < 45:
-        raise RuntimeError(f"Insufficient candles for volatility profile {symbol}")
-
-    close = df["close"]
-    last = float(close.iloc[-1])
-    prev = close.shift(1)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - prev).abs(),
-        (df["low"] - prev).abs(),
-    ], axis=1).max(axis=1)
-
-    atr14 = float(tr.tail(14).mean())
-    median_range = float((df["high"] - df["low"]).tail(30).median())
-    rets = close.pct_change().dropna().tail(60)
-    realized = float(rets.std(ddof=0)) if len(rets) else 0.0
-
-    atr_bps = atr14 / last * 10000.0 if last > 0 else 0.0
-    median_range_bps = median_range / last * 10000.0 if last > 0 else 0.0
-    realized_bps = realized * 10000.0
-
-    # Primary preference: naturally wide candles. Realized volatility is a
-    # secondary confirmation so one isolated wick does not dominate ranking.
-    volatility_score = (
-        atr_bps * 0.55
-        + median_range_bps * 0.30
-        + realized_bps * 0.15
-    )
-    return {
-        "atr_bps": atr_bps,
-        "median_range_bps": median_range_bps,
-        "realized_bps": realized_bps,
-        "volatility_score": volatility_score,
-    }
-
-
-def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
+def _dynamic_universe(max_symbols: int = UNIVERSE_PREFILTER) -> list[str]:
     specs = instrument_specs()
     r = requests.get("https://futures.kraken.com/derivatives/api/v3/tickers", timeout=20)
     r.raise_for_status()
     rows = r.json().get("tickers") or []
+    ranked: list[tuple[float, str]] = []
 
-    eligible: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -241,50 +215,13 @@ def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
             except Exception:
                 pass
 
-        # First stage prevents low-liquidity junk from entering the expensive
-        # candle-volatility ranking.
-        liquidity_score = liquidity / max(1.0, 1.0 + spread_bps)
-        eligible.append({
-            "symbol": symbol,
-            "liquidity": liquidity,
-            "spread_bps": spread_bps,
-            "liquidity_score": liquidity_score,
-        })
+        # Cheap stage: keep only liquid/tight markets. Candle volatility is
+        # ranked later from the same data already fetched for the signal.
+        score = liquidity / max(1.0, 1.0 + spread_bps)
+        ranked.append((score, symbol))
 
-    eligible.sort(key=lambda x: float(x["liquidity_score"]), reverse=True)
-    prefiltered = eligible[:UNIVERSE_PREFILTER]
-
-    profiled: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(prefiltered)))) as pool:
-        futures = {
-            pool.submit(_volatility_profile, str(row["symbol"])): row
-            for row in prefiltered
-        }
-        for fut in as_completed(futures):
-            row = futures[fut]
-            try:
-                vol = fut.result()
-            except Exception:
-                continue
-
-            spread_penalty = 1.0 + float(row["spread_bps"]) / 12.0
-            liquidity_bonus = 1.0
-            if float(row["liquidity"]) > 0:
-                # Small liquidity bonus only; volatility remains dominant.
-                liquidity_bonus += min(0.20, math.log10(1.0 + float(row["liquidity"])) / 50.0)
-
-            final_score = float(vol["volatility_score"]) * liquidity_bonus / spread_penalty
-            profiled.append({**row, **vol, "final_score": final_score})
-
-    profiled.sort(
-        key=lambda x: (
-            float(x["final_score"]),
-            float(x["atr_bps"]),
-            -float(x["spread_bps"]),
-        ),
-        reverse=True,
-    )
-    return [str(x["symbol"]) for x in profiled[:max_symbols]]
+    ranked.sort(reverse=True)
+    return [symbol for _, symbol in ranked[:max_symbols]]
 
 
 def _log(event: dict[str, Any]) -> None:
@@ -295,16 +232,24 @@ def _log(event: dict[str, Any]) -> None:
 
 
 def public_scan() -> dict[str, Any]:
-    symbols = _dynamic_universe()
-    rows: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(symbols)))) as pool:
-        futs = {pool.submit(_signal, symbol): symbol for symbol in symbols}
+    prefilter_symbols = _dynamic_universe(UNIVERSE_PREFILTER)
+    scanned: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(prefilter_symbols)))) as pool:
+        futs = {pool.submit(_signal, symbol): symbol for symbol in prefilter_symbols}
         for fut in as_completed(futs):
             symbol = futs[fut]
             try:
-                rows.append(fut.result())
+                scanned.append(fut.result())
             except Exception as exc:
-                rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+                scanned.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+
+    valid = [x for x in scanned if not x.get("error")]
+    valid.sort(
+        key=lambda x: float(x.get("volatility_score") or 0.0),
+        reverse=True,
+    )
+    rows = valid[:MAX_UNIVERSE]
+    symbols = [str(x.get("symbol") or "") for x in rows]
 
     rows.sort(
         key=lambda x: (
@@ -321,6 +266,7 @@ def public_scan() -> dict[str, Any]:
         "candidate": ready[0] if ready else (rows[0] if rows else None),
         "ready_count": len(ready),
         "universe_count": len(symbols),
+        "prefilter_count": len(prefilter_symbols),
         "symbols": symbols,
         "all": rows,
         "round_trip_taker_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
