@@ -223,3 +223,6 @@ All Relative Value PAPER, status, readiness and live-canary processes are pinned
 
 ### Robust RV history validation
 RV entry statistics now use time-decimated, spread-quality-filtered history and robust median/MAD z-scores so stale or wide fixed-future quotes cannot dominate the baseline.
+
+### Real Kraken status validation
+Status reporting now shows private Kraken account capital separately from PAPER equity, and private readiness generates a read-only inventory snapshot.
