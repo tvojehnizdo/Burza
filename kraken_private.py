@@ -42,6 +42,9 @@ class KrakenPrivate:
         path = f"/0/private/{endpoint}"
         data = dict(payload or {})
         data["nonce"] = self._nonce()
+        otp = os.getenv("KRAKEN_OTP", "").strip()
+        if otp:
+            data["otp"] = otp
         headers = {
             "API-Key": self.key,
             "API-Sign": self._sign(path, data),
@@ -236,13 +239,66 @@ def compact_balances(balance: dict[str, Any]) -> dict[str, float]:
     return out
 
 
-def find_xbt_pair(client: KrakenPrivate) -> tuple[str, float]:
+def find_margin_test_pair(client: KrakenPrivate) -> tuple[str, float, float]:
+    """Pick a low-notional online USD/EUR pair that advertises 2x buy leverage.
+
+    This is only used with AddOrder(validate=true), so no order reaches the
+    matching engine. Choosing a low-notional pair reduces false readiness
+    failures caused by account size rather than API configuration.
+    """
     pairs = client.public("AssetPairs")
-    for _, meta in pairs.items():
-        if meta.get("altname") == "XBTUSD":
-            minimum = float(meta.get("ordermin") or 0.0001)
-            return "XBTUSD", minimum
-    return "XBTUSD", 0.0001
+    ticker = client.public("Ticker")
+    candidates: list[tuple[float, str, float, float]] = []
+
+    for internal, meta in pairs.items():
+        alt = meta.get("altname")
+        ws = meta.get("wsname") or ""
+        if not alt or "/" not in ws or meta.get("status", "online") != "online":
+            continue
+        quote = ws.split("/")[-1]
+        if quote not in {"USD", "EUR"}:
+            continue
+
+        levs = meta.get("leverage_buy") or []
+        try:
+            levs = [int(x) for x in levs]
+        except Exception:
+            levs = []
+        if 2 not in levs:
+            continue
+
+        try:
+            volume = float(meta.get("ordermin") or 0.0)
+        except Exception:
+            volume = 0.0
+        if volume <= 0:
+            continue
+
+        t = ticker.get(internal) or ticker.get(alt)
+        if not t:
+            continue
+        try:
+            price = float(t["c"][0])
+        except Exception:
+            continue
+
+        try:
+            costmin = float(meta.get("costmin") or 0.0)
+        except Exception:
+            costmin = 0.0
+
+        if costmin > 0 and volume * price < costmin:
+            volume = max(volume, costmin / price * 1.02)
+
+        notional = volume * price
+        candidates.append((notional, alt, volume, price))
+
+    if not candidates:
+        return "XBTUSD", 0.0001, 0.0
+
+    candidates.sort(key=lambda x: x[0])
+    notional, pair, volume, price = candidates[0]
+    return pair, volume, notional
 
 
 def readiness(env_file: str | None = None) -> dict[str, Any]:
@@ -301,7 +357,7 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
     # checked by Kraken but never sent to the matching engine.
     validate_order = {"ok": False}
     try:
-        pair, minimum = find_xbt_pair(client)
+        pair, minimum, test_notional = find_margin_test_pair(client)
         result = client.private("AddOrder", {
             "pair": pair,
             "type": "buy",
@@ -314,6 +370,7 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
             "ok": True,
             "pair": pair,
             "volume": minimum,
+            "estimated_notional_quote": round(test_notional, 8),
             "leverage": "2",
             "validate_only": True,
             "result": result,
