@@ -24,24 +24,57 @@ def _get(path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str, Any]]:
     pairs = _get("/AssetPairs")
-    tickers = _get("/Ticker")
 
-    rows: list[dict[str, Any]] = []
+    eligible: list[tuple[str, str, str, str, dict[str, Any]]] = []
     for internal, meta in pairs.items():
         ws = str(meta.get("wsname") or "")
         alt = str(meta.get("altname") or "")
-        if not ws or "/" not in ws or ".d" in alt.lower():
+        if not ws or "/" not in ws or not alt or ".d" in alt.lower():
             continue
         if str(meta.get("status") or "online") != "online":
             continue
         base, quote = ws.split("/", 1)
-        if quote not in {"USD","USDC"}:
+        if quote not in {"USD", "USDC"}:
             continue
-        if base in {"USD","USDT","USDC","DAI","USDG","PYUSD","EUR"}:
+        if base in {"USD", "USDT", "USDC", "DAI", "USDG", "PYUSD", "EUR"}:
             continue
-        t = tickers.get(internal)
+        eligible.append((str(internal), alt, ws, base, meta))
+
+    # Kraken can expose different pair aliases in AssetPairs vs Ticker result
+    # keys. Query known altnames in batches and accept either key form.
+    tickers: dict[str, Any] = {}
+    for i in range(0, len(eligible), 40):
+        batch = eligible[i:i + 40]
+        names = ",".join(x[1] for x in batch)
+        try:
+            data = _get("/Ticker", {"pair": names})
+            if isinstance(data, dict):
+                tickers.update(data)
+        except Exception:
+            continue
+
+    rows: list[dict[str, Any]] = []
+    for internal, alt, ws, base, meta in eligible:
+        quote = ws.split("/", 1)[1]
+        t = tickers.get(internal) or tickers.get(alt)
+
+        if not isinstance(t, dict):
+            # Last-resort alias match. This is intentionally conservative and
+            # only used when the exact Kraken keys differ.
+            compact_ws = ws.replace("/", "").upper()
+            candidates = {
+                internal.upper(), alt.upper(), compact_ws,
+                internal.upper().replace("X", "", 1),
+            }
+            for key, value in tickers.items():
+                ku = str(key).upper()
+                if ku in candidates or ku.endswith(alt.upper()):
+                    t = value
+                    break
+
         if not isinstance(t, dict):
             continue
+
         try:
             bid = float(t["b"][0])
             ask = float(t["a"][0])
@@ -51,18 +84,22 @@ def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str
             continue
         if bid <= 0 or ask <= bid:
             continue
+
         mid = (bid + ask) / 2.0
         spread_bps = (ask - bid) / mid * 10000.0
         if spread_bps > max_spread_bps:
             continue
+
         turnover = v24 * vwap
         if turnover <= 0:
             continue
+
         rows.append({
             "symbol": ws,
             "base": base,
             "quote": quote,
             "altname": alt,
+            "internal": internal,
             "turnover_24h_usd_proxy": turnover,
             "spread_bps": spread_bps,
             "ordermin": meta.get("ordermin"),
@@ -70,32 +107,36 @@ def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str
             "lot_decimals": meta.get("lot_decimals"),
         })
 
-    # Rank by liquidity/spread, but for the same base prefer a USDC quote so
-    # existing USDC capital can be deployed without an extra conversion leg.
+    # Do not collapse USD and USDC into a single base market here. Keeping both
+    # allows the account-aware scanner to use whichever quote currency is
+    # actually funded.
     rows.sort(
         key=lambda x: (
+            1 if x.get("quote") == "USDC" else 0,
             x["turnover_24h_usd_proxy"],
             -x["spread_bps"],
-            1 if x.get("quote") == "USDC" else 0,
         ),
         reverse=True,
     )
-    best_by_base: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        base = str(row.get("base") or "")
-        prev = best_by_base.get(base)
-        if prev is None:
-            best_by_base[base] = row
+
+    # Reserve roughly half the slots for funded USDC routes when available and
+    # fill the remainder by overall liquidity.
+    usdc_rows = [x for x in rows if x.get("quote") == "USDC"]
+    usd_rows = [x for x in rows if x.get("quote") == "USD"]
+    keep_usdc = min(len(usdc_rows), max(4, max_pairs // 2))
+    picked = usdc_rows[:keep_usdc]
+    seen = {x["symbol"] for x in picked}
+    for row in sorted(
+        usd_rows + usdc_rows[keep_usdc:],
+        key=lambda x: (x["turnover_24h_usd_proxy"], -x["spread_bps"]),
+        reverse=True,
+    ):
+        if row["symbol"] in seen:
             continue
-        # If a USDC market exists and is not materially worse on spread/liquidity,
-        # prefer it to avoid USDC->USD conversion churn.
-        if row.get("quote") == "USDC":
-            spread_ok = float(row["spread_bps"]) <= max(float(prev["spread_bps"]) * 1.35, float(prev["spread_bps"]) + 2.0)
-            liquidity_ok = float(row["turnover_24h_usd_proxy"]) >= float(prev["turnover_24h_usd_proxy"]) * 0.20
-            if spread_ok and liquidity_ok:
-                best_by_base[base] = row
-    picked = list(best_by_base.values())
-    picked.sort(key=lambda x: (x["turnover_24h_usd_proxy"], -x["spread_bps"]), reverse=True)
+        picked.append(row)
+        seen.add(row["symbol"])
+        if len(picked) >= max_pairs:
+            break
     return picked[:max_pairs]
 
 
