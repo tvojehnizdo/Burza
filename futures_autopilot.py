@@ -653,6 +653,7 @@ def selftest() -> dict[str, Any]:
             and NO_PROGRESS_SEC < HARD_MAX_HOLD_SEC
             and MAX_OPEN_POSITIONS == 4
         ),
+        "drawdown_limit_is_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
     }
     return {"ok": all(checks.values()), "checks": checks}
 
