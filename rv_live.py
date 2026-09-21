@@ -25,6 +25,7 @@ LOG_PATH = Path(os.getenv("RV_LIVE_LOG", "data/rv_live_events.jsonl"))
 
 DEFAULT_POLICY = {
     "live_execution": False,
+    "allow_new_entries": False,
     "target_notional_usd_per_leg": 10.0,
     "max_live_pairs": 1,
     "min_closed_paper_pairs": 20,
@@ -48,6 +49,7 @@ def load_policy() -> dict[str, Any]:
         except Exception:
             pass
     p["live_execution"] = bool(p.get("live_execution", False))
+    p["allow_new_entries"] = bool(p.get("allow_new_entries", False))
     p["target_notional_usd_per_leg"] = min(max(float(p.get("target_notional_usd_per_leg", 10.0)), 1.0), 15.0)
     p["max_live_pairs"] = 1
     p["min_closed_paper_pairs"] = max(int(p.get("min_closed_paper_pairs", 20)), 20)
@@ -204,6 +206,7 @@ def readiness(path: Path = RV_DB_PATH) -> dict[str, Any]:
         "account_clean_for_managed_state": account_clean,
         "blockers": blockers,
         "live_execution": bool(policy.get("live_execution")) and bool(load_futures_policy().get("live_execution")),
+        "allow_new_entries": bool(policy.get("allow_new_entries")),
     }
 
 
@@ -220,13 +223,32 @@ def set_live_execution(enabled: bool, path: Path = RV_DB_PATH) -> dict[str, Any]
         if not r.get("safe_to_arm"):
             raise RuntimeError("RV live readiness failed: " + ",".join(r.get("blockers") or []))
         save_futures_policy({"live_execution": True})
-        p = save_policy({"live_execution": True})
+        p = save_policy({"live_execution": True, "allow_new_entries": True})
         _event("ARM", {"paper_evidence": r["paper_evidence"]})
-        return {"armed": True, "policy": p, "readiness": r}
-    p = save_policy({"live_execution": False})
+        return {"armed": True, "allow_new_entries": True, "policy": p, "readiness": r}
+
+    managed = _managed_open(path)
+    if managed:
+        p = save_policy({"live_execution": True, "allow_new_entries": False})
+        save_futures_policy({"live_execution": True})
+        _event("DISARM_REQUESTED_PENDING_EXIT", {"managed_open": managed})
+        return {
+            "armed": True,
+            "allow_new_entries": False,
+            "pending_exit": True,
+            "managed_open": managed,
+            "policy": p,
+        }
+
+    p = save_policy({"live_execution": False, "allow_new_entries": False})
     save_futures_policy({"live_execution": False})
     _event("DISARM", {})
-    return {"armed": False, "policy": p}
+    return {
+        "armed": False,
+        "allow_new_entries": False,
+        "pending_exit": False,
+        "policy": p,
+    }
 
 
 def _candidate(perp: str, fixed: str) -> dict[str, Any] | None:
@@ -263,7 +285,7 @@ def _closed_live_targets(path: Path = RV_DB_PATH) -> list[dict[str, Any]]:
             """SELECT l.paper_id,l.root,l.perp_symbol,l.fixed_symbol,l.direction,l.size_base
                FROM rv_live_pairs l
                JOIN rv_paper_pairs p ON p.id=l.paper_id
-               WHERE l.status='OPEN' AND p.status='CLOSED'
+               WHERE l.status IN ('OPEN','CLOSE_ERROR') AND p.status='CLOSED'
                ORDER BY p.closed_ms"""
         ).fetchall()
     return [
@@ -462,12 +484,12 @@ def close_live_pair(row: dict[str, Any], path: Path = RV_DB_PATH) -> dict[str, A
 
 def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
     rdy = readiness(path)
+    policy = load_policy()
     if not rdy.get("live_execution"):
         return {"active": False, "readiness": rdy, "opened": [], "closed": []}
 
     # Existing live exposure is always managed before evaluating any new-entry
     # evidence gate. A deteriorating paper metric must never prevent an exit.
-    managed_before = _managed_open(path)
     closed: list[dict[str, Any]] = []
     for row in _closed_live_targets(path):
         closed.append(close_live_pair(row, path))
@@ -477,6 +499,21 @@ def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
         return {
             "active": True,
             "management_only": True,
+            "allow_new_entries": bool(policy.get("allow_new_entries")),
+            "readiness": readiness(path),
+            "opened": [],
+            "closed": closed,
+        }
+
+    if not policy.get("allow_new_entries"):
+        p = save_policy({"live_execution": False, "allow_new_entries": False})
+        save_futures_policy({"live_execution": False})
+        _event("DISARM_COMPLETED_AFTER_EXIT", {})
+        return {
+            "active": False,
+            "auto_disarmed": True,
+            "allow_new_entries": False,
+            "policy": p,
             "readiness": readiness(path),
             "opened": [],
             "closed": closed,
@@ -484,8 +521,6 @@ def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
 
     rdy_after_close = readiness(path)
     if not rdy_after_close.get("safe_to_arm"):
-        # With no managed positions remaining it is safe to disarm and block
-        # further entries until all evidence/account gates pass again.
         set_live_execution(False, path)
         return {
             "active": False,
@@ -499,7 +534,13 @@ def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
     for row in _open_paper_candidates(path)[:1]:
         opened.append(open_live_pair(row, path))
 
-    return {"active": True, "readiness": readiness(path), "opened": opened, "closed": closed}
+    return {
+        "active": True,
+        "allow_new_entries": True,
+        "readiness": readiness(path),
+        "opened": opened,
+        "closed": closed,
+    }
 
 
 def daemon(path: Path = RV_DB_PATH) -> None:
