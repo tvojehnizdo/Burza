@@ -43,3 +43,5 @@ Endpoint: /api/futures-pulses
 - spot remains long-only and intentionally rejects ordinary micro-scalps when Tier-1 costs dominate the predicted move
 
 This is still a research gate: a profitable holdout is required before any LIVE implementation.
+
+CI also runs `research.py` and stores `research-report.json`, selecting on train+validation and reporting the untouched holdout separately.
