@@ -32,12 +32,12 @@ $env:SHADOW_ALLOW_UNVALIDATED = "0"
 $env:SCENARIO_PAPER_ENABLED = "0"
 
 # Primary engine: delta-neutral PF <-> FF basis/funding discovery.
-$env:RV_SCAN_INTERVAL_S = "10"
+$env:RV_SCAN_INTERVAL_S = "5"
 $env:RV_MAKER_FEE_BPS = "2"
 $env:RV_ADVERSE_BUFFER_BPS = "4"
-$env:RV_MIN_NET_EDGE_BPS = "8"
+$env:RV_MIN_NET_EDGE_BPS = "5"
 $env:RV_MIN_HISTORY = "60"
-$env:RV_ENTRY_Z = "2.0"
+$env:RV_ENTRY_Z = "1.5"
 $env:RV_EXIT_Z = "0.5"
 $env:RV_STOP_Z = "3.5"
 $env:RV_MIN_DAYS_TO_EXPIRY = "0.5"
@@ -49,18 +49,18 @@ $env:RV_DB = "data/relative_value_v2.db"
 $env:RV_PAPER_ENABLED = "1"
 $env:RV_PAPER_START_EQUITY = "5000"
 $env:RV_PAPER_ALLOC_PCT = "15"
-$env:RV_PAPER_MAX_OPEN = "2"
+$env:RV_PAPER_MAX_OPEN = "3"
 $env:RV_PAPER_TAKE_BPS = "6"
 $env:RV_PAPER_STOP_BPS = "60"
-$env:RV_PAPER_MAX_HOLD_H = "6"
-$env:RV_PAPER_REENTRY_COOLDOWN_S = "300"
+$env:RV_PAPER_MAX_HOLD_H = "4"
+$env:RV_PAPER_REENTRY_COOLDOWN_S = "180"
 
 Write-Host ""
 Write-Host "Primary strategy: PF/FF market-neutral relative value" -ForegroundColor Green
 Write-Host "Eligible opportunities: AUTO-EXECUTE in PAPER (two-leg)" -ForegroundColor Green
-Write-Host "Scanner cadence: 10 s" -ForegroundColor Green
+Write-Host "Scanner cadence: 5 s (FAST PAPER)" -ForegroundColor Green
 Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" -ForegroundColor Green
-Write-Host "Entry: basis deviation >= 2.0 sigma after >=60 observations and all modeled friction" -ForegroundColor Green
+Write-Host "Entry: basis deviation >= 1.5 sigma after >=60 observations; min net edge 5 bps" -ForegroundColor Green
 Write-Host "Directional unvalidated shadow: OFF" -ForegroundColor Yellow
 Write-Host "LIVE orders: DISABLED" -ForegroundColor Yellow
 Write-Host "Dashboard: http://127.0.0.1:8765" -ForegroundColor Green
