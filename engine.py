@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from alpha_discovery import (
     AlphaRuntime,
@@ -22,6 +23,11 @@ from alpha_discovery import (
 )
 from microstructure import KrakenMicroRecorder
 from relative_value import RelativeValueRuntime, scan_opportunities as scan_relative_value
+from fx_breakout import (
+    ingest_quote as fx_ingest_quote,
+    arm_news_event as fx_arm_news_event,
+    status as fx_breakout_status,
+)
 
 KRAKEN = "https://api.kraken.com"
 KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
@@ -608,10 +614,11 @@ small{color:#9aa9c7}
 <button onclick="go('/api/v4/models')">Alpha models</button>
 <button onclick="go('/api/v4/paper')">Paper ledger</button>
 <button onclick="go('/api/v4/relative-value')">Relative value</button>
+<button onclick="go('/api/v4/fx-breakout')">GBP/JPY Breakout Lab</button>
 <button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
 <button onclick="go('/api/v4/stop','POST')">Stop</button>
 </div>
-<small>Directional alpha remains PAPER-only. Relative-value scanner searches PF/FF basis opportunities independently and never submits orders.</small>
+<small>Directional alpha remains PAPER-only. Relative-value scanner searches PF/FF basis opportunities independently. GBP/JPY Breakout Lab is a separate PAPER research lane and does not share its ledger.</small>
 <pre id='o'>Ready.</pre>
 <script>
 async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,{method:m});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=String(e)}}
@@ -631,6 +638,7 @@ def health():
         "validated_horizons": list(VALIDATED_HORIZONS),
         "shadow_horizons": list(SHADOW_HORIZONS),
         "relative_value": RELATIVE_VALUE_RUNTIME.status(),
+        "fx_breakout": fx_breakout_status(),
         "live_orders": False,
     }
 
@@ -670,6 +678,7 @@ def v4_status():
         "recorder": RECORDER.status(),
         "alpha": ALPHA_RUNTIME.status(),
         "relative_value": RELATIVE_VALUE_RUNTIME.status(),
+        "fx_breakout": fx_breakout_status(),
         "decision_interval_s": int(os.getenv("ALPHA_INTERVAL_S", "30")),
         "execution_mode": EXECUTION_MODE,
         "alpha_cost_bps": ALPHA_COST_BPS,
@@ -700,6 +709,61 @@ def v4_relative_value():
         return scan_relative_value()
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
+
+
+
+class FXQuoteIn(BaseModel):
+    bid: float
+    ask: float
+    ts_ms: int | None = None
+    source: str = "broker"
+    news_active: bool = False
+    news_event_id: str | None = None
+
+
+class FXNewsEventIn(BaseModel):
+    event_id: str
+    release_ms: int
+    label: str = ""
+    window_before_min: int = 15
+    window_after_min: int = 15
+
+
+@app.get("/api/v4/fx-breakout")
+def v4_fx_breakout():
+    try:
+        return fx_breakout_status()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
+
+
+@app.post("/api/v4/fx-breakout/quote")
+def v4_fx_breakout_quote(payload: FXQuoteIn):
+    try:
+        return fx_ingest_quote(
+            bid=payload.bid,
+            ask=payload.ask,
+            ts_ms=payload.ts_ms,
+            source=payload.source,
+            news_active=payload.news_active,
+            news_event_id=payload.news_event_id,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "live_orders": False}
+
+
+@app.post("/api/v4/fx-breakout/news-event")
+def v4_fx_breakout_news_event(payload: FXNewsEventIn):
+    try:
+        return fx_arm_news_event(
+            event_id=payload.event_id,
+            release_ms=payload.release_ms,
+            label=payload.label,
+            window_before_min=payload.window_before_min,
+            window_after_min=payload.window_after_min,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "live_orders": False}
 
 
 @app.get("/api/v4/paper")
