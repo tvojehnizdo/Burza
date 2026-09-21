@@ -111,6 +111,28 @@ def init_db(path: Path = DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_shadow_paper_status
                 ON shadow_paper_trades(status, closed_ms);
 
+            CREATE TABLE IF NOT EXISTS scenario_paper_trades(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_ms INTEGER NOT NULL,
+                closed_ms INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                horizon_s INTEGER NOT NULL,
+                entry REAL NOT NULL,
+                exit REAL,
+                notional_czk REAL NOT NULL,
+                gross_edge_bps REAL NOT NULL,
+                score REAL NOT NULL,
+                cost_bps REAL NOT NULL,
+                pnl_czk REAL,
+                net_bps REAL,
+                state_key TEXT NOT NULL,
+                scenario TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN'
+            );
+            CREATE INDEX IF NOT EXISTS idx_scenario_paper_status
+                ON scenario_paper_trades(scenario, status, closed_ms);
+
             CREATE TABLE IF NOT EXISTS runtime_meta(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
