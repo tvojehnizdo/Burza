@@ -88,9 +88,11 @@ catch {
 
 $status = Safe-InvokeRest "$BaseUrl/api/v4/status"
 $rv     = Safe-InvokeRest "$BaseUrl/api/v4/relative-value"
+$fx     = Safe-InvokeRest "$BaseUrl/api/v4/fx-breakout"
 
 $statusErr = Get-Prop $status "__error"
 $rvErr     = Get-Prop $rv "__error"
+$fxErr     = Get-Prop $fx "__error"
 
 $version = Get-Prop $status "version" "-"
 $recorder = Get-Prop $status "recorder"
@@ -109,6 +111,9 @@ if ($statusErr) {
 }
 if ($rvErr) {
     $warnings.Add("RELATIVE VALUE API nedostupné: $rvErr")
+}
+if ($fxErr) {
+    $warnings.Add("FX BREAKOUT API nedostupné: $fxErr")
 }
 if ($engineBuildLocal -ne "-" -and $version -ne "-" -and $engineBuildLocal -ne $version) {
     $warnings.Add("Lokální engine.py ($engineBuildLocal) neodpovídá běžícímu serveru ($version).")
@@ -213,6 +218,15 @@ $report = [ordered]@{
         shadow_enabled = Get-Prop (Get-Prop $alpha "shadow") "enabled" $false
         preferred_scenario_enabled = Get-Prop (Get-Prop $alpha "preferred_scenario") "enabled" $false
     }
+    fx_breakout = [ordered]@{
+        mode = Get-Prop $fx "mode"
+        pair = Get-Prop $fx "pair"
+        feed_ready = Get-Prop $fx "feed_ready" $false
+        quotes = Get-Prop (Get-Prop $fx "feed") "quotes" 0
+        avg_spread_pips = Get-Prop (Get-Prop $fx "feed") "avg_spread_pips"
+        max_spread_pips = Get-Prop (Get-Prop $fx "feed") "max_spread_pips"
+        state = Get-Prop $fx "paper_execution_state"
+    }
     relative_value = [ordered]@{
         running = $rvRunning
         last_error = $rvLastError
@@ -261,6 +275,14 @@ $lines.Add("  rows:           $(Get-Prop $recorder 'rows')")
 $lines.Add("  msg age ms:     $(Get-Prop $recorder 'last_message_age_ms')")
 $lines.Add("  reconnects:     $(Get-Prop $recorder 'reconnects')")
 $lines.Add("  error:          $(Get-Prop $recorder 'last_error')")
+$lines.Add("")
+$lines.Add("GBP/JPY BREAKOUT LAB")
+$lines.Add("  mode:           $(Get-Prop $fx 'mode')")
+$lines.Add("  feed ready:     $(Get-Prop $fx 'feed_ready')")
+$lines.Add("  quotes:         $(Get-Prop (Get-Prop $fx 'feed') 'quotes')")
+$lines.Add("  avg spread:     $(Fmt (Get-Prop (Get-Prop $fx 'feed') 'avg_spread_pips') 3) pips")
+$lines.Add("  max spread:     $(Fmt (Get-Prop (Get-Prop $fx 'feed') 'max_spread_pips') 3) pips")
+$lines.Add("  state:          $(Get-Prop $fx 'paper_execution_state')")
 $lines.Add("")
 $lines.Add("RELATIVE VALUE V2")
 $lines.Add("  running:        $rvRunning")
