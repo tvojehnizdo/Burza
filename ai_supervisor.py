@@ -170,6 +170,14 @@ def apply_actions(plan: dict[str, Any]) -> list[dict[str, Any]]:
                 results.append({"type": typ, "ok": True, "result": cancel_all_orders()})
             elif typ == "futures_deadman":
                 import futures_private
+                ready = futures_private.readiness()
+                if not ready.get("safe_to_arm"):
+                    results.append({
+                        "type": typ,
+                        "ok": False,
+                        "reason": "Futures API key permissions are unsafe: transfer/withdrawal access must be NO_ACCESS",
+                    })
+                    continue
                 timeout_s = int(action.get("timeout_s", 60))
                 timeout_s = max(10, min(timeout_s, 300))
                 results.append({

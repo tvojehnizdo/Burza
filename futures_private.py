@@ -160,7 +160,10 @@ def main() -> None:
     ap.add_argument("--readiness", action="store_true")
     args = ap.parse_args()
     if args.readiness:
-        print(json.dumps(readiness(), indent=2, default=str))
+        r = readiness()
+        print(json.dumps(r, indent=2, default=str))
+        if not r.get("safe_to_arm"):
+            raise SystemExit(2)
 
 
 if __name__ == "__main__":
