@@ -12,13 +12,15 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 python -m pip install -r requirements.txt
 
 $candidates = @(
-    $env:KRAKEN_ENV_FILE,
-    "C:\TvojeHnizdo\Vault\.env",
-    (Join-Path $PSScriptRoot ".env")
-) | Where-Object { $_ -and (Test-Path $_) }
+    @(
+        $env:KRAKEN_ENV_FILE,
+        "C:\TvojeHnizdo\Vault\.env",
+        (Join-Path $PSScriptRoot ".env")
+    ) | Where-Object { $_ -and (Test-Path $_) }
+)
 
 if ($candidates.Count -gt 0) {
-    $envFile = $candidates[0]
+    $envFile = [string]$candidates[0]
 } else {
     $envFile = Read-Host "Path to your .env file containing the Kraken key/secret"
     if (-not (Test-Path $envFile)) {
@@ -30,6 +32,9 @@ Write-Host "Credential file found. Values will not be printed." -ForegroundColor
 $env:KRAKEN_ENV_FILE = $envFile
 
 python kraken_private.py --env-file "$envFile" --json
+if ($LASTEXITCODE -ne 0) {
+    throw "Kraken readiness failed with exit code $LASTEXITCODE"
+}
 
 Write-Host ""
 Write-Host "If safe_to_arm=true and actual_order_submitted=false, private API is ready without a real trade." -ForegroundColor Green
