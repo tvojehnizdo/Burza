@@ -93,6 +93,14 @@ $status = Safe-InvokeRest "$BaseUrl/api/v4/status"
 $rv     = Safe-InvokeRest "$BaseUrl/api/v4/relative-value"
 $fx     = Safe-InvokeRest "$BaseUrl/api/v4/fx-breakout"
 
+$KrakenReadinessPath = Join-Path $PSScriptRoot "reports\kraken-readiness-latest.json"
+$krakenReadiness = $null
+if (Test-Path $KrakenReadinessPath) {
+    try {
+        $krakenReadiness = Get-Content -Raw $KrakenReadinessPath | ConvertFrom-Json
+    } catch {}
+}
+
 $statusErr = Get-Prop $status "__error"
 $rvErr     = Get-Prop $rv "__error"
 $fxErr     = Get-Prop $fx "__error"
@@ -240,6 +248,14 @@ $report = [ordered]@{
         shadow_enabled = Get-Prop (Get-Prop $alpha "shadow") "enabled" $false
         preferred_scenario_enabled = Get-Prop (Get-Prop $alpha "preferred_scenario") "enabled" $false
     }
+    kraken = [ordered]@{
+        safe_to_arm = Get-Prop $krakenReadiness "safe_to_arm" $false
+        balances = Get-Prop $krakenReadiness "balance_nonzero"
+        trade_balance = Get-Prop $krakenReadiness "trade_balance"
+        open_orders_count = Get-Prop $krakenReadiness "open_orders_count"
+        open_positions_count = Get-Prop $krakenReadiness "open_positions_count"
+        actual_order_submitted = Get-Prop $krakenReadiness "actual_order_submitted" $false
+    }
     fx_breakout = [ordered]@{
         mode = Get-Prop $fx "mode"
         pair = Get-Prop $fx "pair"
@@ -312,6 +328,17 @@ $lines.Add("  rows:           $(Get-Prop $recorder 'rows')")
 $lines.Add("  msg age ms:     $(Get-Prop $recorder 'last_message_age_ms')")
 $lines.Add("  reconnects:     $(Get-Prop $recorder 'reconnects')")
 $lines.Add("  error:          $(Get-Prop $recorder 'last_error')")
+$lines.Add("")
+$lines.Add("KRAKEN REAL ACCOUNT")
+$lines.Add("  safe_to_arm:     $(Get-Prop $krakenReadiness 'safe_to_arm' $false)")
+$lines.Add("  ETH balance:     $(Get-Prop (Get-Prop $krakenReadiness 'balance_nonzero') 'XETH')")
+$lines.Add("  USD balance:     $(Get-Prop (Get-Prop $krakenReadiness 'balance_nonzero') 'ZUSD')")
+$lines.Add("  equity:          $(Get-Prop (Get-Prop $krakenReadiness 'trade_balance') 'e') USD")
+$lines.Add("  used margin:     $(Get-Prop (Get-Prop $krakenReadiness 'trade_balance') 'm') USD")
+$lines.Add("  free margin:     $(Get-Prop (Get-Prop $krakenReadiness 'trade_balance') 'mf') USD")
+$lines.Add("  open orders:     $(Get-Prop $krakenReadiness 'open_orders_count')")
+$lines.Add("  open positions:  $(Get-Prop $krakenReadiness 'open_positions_count')")
+$lines.Add("  actual submitted:$(Get-Prop $krakenReadiness 'actual_order_submitted' $false)")
 $lines.Add("")
 $lines.Add("GBP/JPY BREAKOUT LAB")
 $lines.Add("  mode:           $(Get-Prop $fx 'mode')")
