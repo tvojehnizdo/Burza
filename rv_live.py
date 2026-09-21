@@ -155,7 +155,7 @@ def _managed_open(path: Path = RV_DB_PATH) -> list[dict[str, Any]]:
     with sqlite3.connect(path) as con:
         rows = con.execute(
             """SELECT paper_id,root,perp_symbol,fixed_symbol,direction,size_base,status
-               FROM rv_live_pairs WHERE status IN ('OPEN','CLOSE_ERROR')
+               FROM rv_live_pairs WHERE status IN ('OPEN','CLOSE_ERROR','OPENING','OPEN_ERROR')
                ORDER BY opened_ms"""
         ).fetchall()
     return [
@@ -231,12 +231,39 @@ def set_live_execution(enabled: bool, path: Path = RV_DB_PATH) -> dict[str, Any]
     if managed:
         p = save_policy({"live_execution": True, "allow_new_entries": False})
         save_futures_policy({"live_execution": True})
-        _event("DISARM_REQUESTED_PENDING_EXIT", {"managed_open": managed})
+        close_results: list[dict[str, Any]] = []
+        for target in _all_managed_targets(path):
+            try:
+                close_results.append(close_live_pair(target, path))
+            except Exception as exc:
+                close_results.append({
+                    "paper_id": target["paper_id"],
+                    "status": "CLOSE_ERROR",
+                    "errors": [f"{type(exc).__name__}: {exc}"],
+                })
+
+        remaining = _managed_open(path)
+        if remaining:
+            _event("DISARM_REQUESTED_PENDING_EXIT", {
+                "managed_open": remaining, "close_results": close_results,
+            })
+            return {
+                "armed": True,
+                "allow_new_entries": False,
+                "pending_exit": True,
+                "managed_open": remaining,
+                "close_results": close_results,
+                "policy": load_policy(),
+            }
+
+        p = save_policy({"live_execution": False, "allow_new_entries": False})
+        save_futures_policy({"live_execution": False})
+        _event("DISARM_AFTER_IMMEDIATE_CLOSE", {"close_results": close_results})
         return {
-            "armed": True,
+            "armed": False,
             "allow_new_entries": False,
-            "pending_exit": True,
-            "managed_open": managed,
+            "pending_exit": False,
+            "close_results": close_results,
             "policy": p,
         }
 
@@ -273,6 +300,24 @@ def _open_paper_candidates(path: Path = RV_DB_PATH) -> list[dict[str, Any]]:
         {
             "paper_id": int(r[0]), "root": r[1], "perp_symbol": r[2],
             "fixed_symbol": r[3], "direction": r[4],
+        }
+        for r in rows
+    ]
+
+
+def _all_managed_targets(path: Path = RV_DB_PATH) -> list[dict[str, Any]]:
+    init_live_db(path)
+    with sqlite3.connect(path) as con:
+        rows = con.execute(
+            """SELECT paper_id,root,perp_symbol,fixed_symbol,direction,size_base
+               FROM rv_live_pairs
+               WHERE status IN ('OPEN','CLOSE_ERROR','OPENING','OPEN_ERROR')
+               ORDER BY opened_ms"""
+        ).fetchall()
+    return [
+        {
+            "paper_id": int(r[0]), "root": r[1], "perp_symbol": r[2],
+            "fixed_symbol": r[3], "direction": r[4], "size_base": float(r[5]),
         }
         for r in rows
     ]
@@ -355,6 +400,19 @@ def open_live_pair(row: dict[str, Any], path: Path = RV_DB_PATH) -> dict[str, An
 
     client = client_from_env()
     before = position_map(client.open_positions())
+
+    with sqlite3.connect(path) as con:
+        con.execute(
+            """INSERT INTO rv_live_pairs(
+                paper_id,opened_ms,root,perp_symbol,fixed_symbol,direction,size_base,
+                target_notional_usd,status
+            ) VALUES(?,?,?,?,?,?,?,?, 'OPENING')""",
+            (
+                int(row["paper_id"]), _now_ms(), row["root"], perp, fixed, direction,
+                size, float(load_policy()["target_notional_usd_per_leg"]),
+            ),
+        )
+
     fixed_result: dict[str, Any] | None = None
     perp_result: dict[str, Any] | None = None
     compensation: dict[str, Any] | None = None
@@ -398,16 +456,16 @@ def open_live_pair(row: dict[str, Any], path: Path = RV_DB_PATH) -> dict[str, An
 
         with sqlite3.connect(path) as con:
             con.execute(
-                """INSERT INTO rv_live_pairs(
-                    paper_id,opened_ms,root,perp_symbol,fixed_symbol,direction,size_base,
-                    target_notional_usd,open_fixed_result,open_perp_result,
-                    compensation_result,status
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,'OPEN')""",
+                """UPDATE rv_live_pairs
+                   SET size_base=?,open_fixed_result=?,open_perp_result=?,
+                       compensation_result=?,status='OPEN',error=NULL
+                   WHERE paper_id=?""",
                 (
-                    int(row["paper_id"]), _now_ms(), row["root"], perp, fixed, direction,
-                    actual_size, float(load_policy()["target_notional_usd_per_leg"]),
-                    json.dumps(fixed_result, default=str), json.dumps(perp_result, default=str),
+                    actual_size,
+                    json.dumps(fixed_result, default=str),
+                    json.dumps(perp_result, default=str),
                     json.dumps(compensation, default=str) if compensation else None,
+                    int(row["paper_id"]),
                 ),
             )
         out = {"paper_id": row["paper_id"], "status": "OPEN", "size_base": actual_size}
@@ -428,9 +486,41 @@ def open_live_pair(row: dict[str, Any], path: Path = RV_DB_PATH) -> dict[str, An
             }
         except Exception as cleanup_exc:
             cleanup = {"error": f"{type(cleanup_exc).__name__}: {cleanup_exc}"}
+        residual = {}
+        try:
+            after_cleanup = position_map(client.open_positions())
+            residual = {
+                "perp": _delta(before, after_cleanup, perp),
+                "fixed": _delta(before, after_cleanup, fixed),
+            }
+        except Exception as residual_exc:
+            residual = {"error": f"{type(residual_exc).__name__}: {residual_exc}"}
+
+        residual_open = any(
+            abs(float(residual.get(k, 0.0))) > 0
+            for k in ("perp", "fixed")
+            if isinstance(residual.get(k, 0.0), (int, float))
+        )
+        status = "OPEN_ERROR" if residual_open else "FAILED_FLAT"
+        with sqlite3.connect(path) as con:
+            con.execute(
+                """UPDATE rv_live_pairs
+                   SET open_fixed_result=?,open_perp_result=?,compensation_result=?,
+                       status=?,error=?
+                   WHERE paper_id=?""",
+                (
+                    json.dumps(fixed_result, default=str),
+                    json.dumps(perp_result, default=str),
+                    json.dumps({"first": compensation, "cleanup": cleanup, "residual": residual}, default=str),
+                    status,
+                    f"{type(exc).__name__}: {exc}",
+                    int(row["paper_id"]),
+                ),
+            )
         _event("OPEN_ERROR", {
             "paper_id": row["paper_id"], "error": f"{type(exc).__name__}: {exc}",
-            "compensation": compensation, "cleanup": cleanup,
+            "compensation": compensation, "cleanup": cleanup, "residual": residual,
+            "status": status,
         })
         raise
 
@@ -495,6 +585,18 @@ def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
         closed.append(close_live_pair(row, path))
 
     managed_after = _managed_open(path)
+    if managed_after and not policy.get("allow_new_entries"):
+        for row in _all_managed_targets(path):
+            try:
+                closed.append(close_live_pair(row, path))
+            except Exception as exc:
+                closed.append({
+                    "paper_id": row["paper_id"],
+                    "status": "CLOSE_ERROR",
+                    "errors": [f"{type(exc).__name__}: {exc}"],
+                })
+        managed_after = _managed_open(path)
+
     if managed_after:
         return {
             "active": True,
