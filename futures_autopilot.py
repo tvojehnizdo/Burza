@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -616,20 +617,40 @@ def selftest() -> dict[str, Any]:
     return {"ok": all(checks.values()), "checks": checks}
 
 
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            text = (result.stdout or "").lower()
+            return str(pid) in text and "no tasks are running" not in text
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 def _acquire_pid_lock() -> None:
     PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     if PID_PATH.exists():
         try:
             pid = int(PID_PATH.read_text(encoding="utf-8").strip())
-            if pid > 0:
-                os.kill(pid, 0)
-                raise RuntimeError(f"Autopilot uz bezi pod PID {pid}")
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            raise RuntimeError("Autopilot PID lock existuje a proces nelze overit")
-        except ValueError:
-            pass
+        except Exception:
+            pid = 0
+        if _pid_is_running(pid):
+            raise RuntimeError(f"Autopilot uz bezi pod PID {pid}")
     PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
 
 
