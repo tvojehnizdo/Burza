@@ -3,6 +3,7 @@ Set-Location $PSScriptRoot
 
 $Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $KrakenStore = "C:\TvojeHnizdo\Vault\Kraken\trading.credentials.dpapi.json"
+$FuturesStore = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
 $OpenAIStore = "C:\TvojeHnizdo\Vault\OpenAI\impulse-supervisor.dpapi.json"
 
 function Secure-ToPlain([Security.SecureString]$Secure) {
@@ -56,6 +57,15 @@ if (-not $kp) { throw "Unable to load Kraken encrypted credentials." }
 $env:KRAKEN_API_KEY = Secure-ToPlain $kp[0]
 $env:KRAKEN_API_SECRET = Secure-ToPlain $kp[1]
 
+if (Test-Path $FuturesStore) {
+    $fp = Load-EncryptedPair $FuturesStore
+    if ($fp) {
+        $env:KRAKEN_FUTURES_API_KEY = Secure-ToPlain $fp[0]
+        $env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $fp[1]
+        Write-Host "Kraken Futures credentials loaded from DPAPI store." -ForegroundColor Green
+    }
+}
+
 $oa = Load-OpenAIKey
 if (-not $oa) {
     Write-Host ""
@@ -87,4 +97,6 @@ Start-Process "http://127.0.0.1:8770"
 
 Remove-Item Env:KRAKEN_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:KRAKEN_API_SECRET -ErrorAction SilentlyContinue
+Remove-Item Env:KRAKEN_FUTURES_API_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:KRAKEN_FUTURES_API_SECRET -ErrorAction SilentlyContinue
 Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
