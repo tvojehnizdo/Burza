@@ -213,8 +213,8 @@ function Ensure-V4 {
         return
     }
 
-    Write-Host "V4 neběží -> spouštím ho v novém PowerShell okně..." -ForegroundColor Yellow
-    $launcher = Join-Path $PSScriptRoot "start_v4.ps1"
+    Write-Host "V4 neběží -> spouštím neutrální sekvenční hunter profil v novém PowerShell okně..." -ForegroundColor Yellow
+    $launcher = Join-Path $PSScriptRoot "start_v4_neutral.ps1"
     Start-Process pwsh.exe -ArgumentList "-NoExit","-ExecutionPolicy","Bypass","-File",$launcher
 
     for ($i=0; $i -lt 20; $i++) {
