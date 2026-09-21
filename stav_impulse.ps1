@@ -47,12 +47,14 @@ function Fmt {
 $gitBranch = "-"
 $gitHead = "-"
 $gitDirty = "-"
+$gitDirtyFiles = @()
 $gitRemote = "-"
 try { $gitBranch = (git branch --show-current 2>$null).Trim() } catch {}
 try { $gitHead = (git rev-parse --short HEAD 2>$null).Trim() } catch {}
 try {
     $dirtyLines = @(git status --porcelain 2>$null)
     $gitDirty = if ($dirtyLines.Count -gt 0) { "ANO" } else { "NE" }
+    $gitDirtyFiles = @($dirtyLines | ForEach-Object { $_.Trim() })
 } catch {}
 try { $gitRemote = (git remote get-url origin 2>$null).Trim() } catch {}
 
@@ -100,6 +102,21 @@ $alpha = Get-Prop $status "alpha"
 $rel = Get-Prop $status "relative_value"
 $paper = Get-Prop $rv "paper"
 
+$rvLive = $null
+$rvLiveErr = $null
+$Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (Test-Path $Python) {
+    try {
+        $rvLiveJson = & $Python -c "import json,rv_live; print(json.dumps({'policy':rv_live.load_policy(),'evidence':rv_live.paper_evidence(),'managed':rv_live._managed_open()}, default=str))"
+        if ($LASTEXITCODE -eq 0 -and $rvLiveJson) {
+            $rvLive = ($rvLiveJson -join [Environment]::NewLine) | ConvertFrom-Json
+        }
+    }
+    catch {
+        $rvLiveErr = $_.Exception.Message
+    }
+}
+
 if ($null -eq $paper -and $null -ne $rel) {
     $paper = Get-Prop $rel "paper"
 }
@@ -114,6 +131,9 @@ if ($rvErr) {
 }
 if ($fxErr) {
     $warnings.Add("FX BREAKOUT API nedostupné: $fxErr")
+}
+if ($rvLiveErr) {
+    $warnings.Add("RV LIVE status nelze načíst: $rvLiveErr")
 }
 if ($engineBuildLocal -ne "-" -and $version -ne "-" -and $engineBuildLocal -ne $version) {
     $warnings.Add("Lokální engine.py ($engineBuildLocal) neodpovídá běžícímu serveru ($version).")
@@ -194,6 +214,7 @@ $report = [ordered]@{
         branch = $gitBranch
         head = $gitHead
         dirty = $gitDirty
+        dirty_files = $gitDirtyFiles
         remote = $gitRemote
     }
     local_engine_build = $engineBuildLocal
@@ -226,6 +247,16 @@ $report = [ordered]@{
         avg_spread_pips = Get-Prop (Get-Prop $fx "feed") "avg_spread_pips"
         max_spread_pips = Get-Prop (Get-Prop $fx "feed") "max_spread_pips"
         state = Get-Prop $fx "paper_execution_state"
+    }
+    rv_live = [ordered]@{
+        armed = Get-Prop (Get-Prop $rvLive "policy") "live_execution" $false
+        target_notional_usd_per_leg = Get-Prop (Get-Prop $rvLive "policy") "target_notional_usd_per_leg"
+        evidence_gate = Get-Prop (Get-Prop $rvLive "evidence") "gate" $false
+        closed_pairs = Get-Prop (Get-Prop $rvLive "evidence") "closed_pairs" 0
+        net_pnl_czk = Get-Prop (Get-Prop $rvLive "evidence") "net_pnl_czk"
+        profit_factor = Get-Prop (Get-Prop $rvLive "evidence") "profit_factor"
+        max_drawdown_pct = Get-Prop (Get-Prop $rvLive "evidence") "max_drawdown_pct"
+        managed = Get-Prop $rvLive "managed" @()
     }
     relative_value = [ordered]@{
         running = $rvRunning
@@ -266,6 +297,9 @@ $lines.Add("==============================================")
 $lines.Add("Cas:              $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 $lines.Add("Git:              $gitBranch @ $gitHead | dirty=$gitDirty")
 $lines.Add("Local build:      $engineBuildLocal")
+if ($gitDirtyFiles.Count -gt 0) {
+    $lines.Add("Git dirty files:  " + ($gitDirtyFiles -join " | "))
+}
 $lines.Add("Server build:     $version")
 $lines.Add("Port 8765:        $($listenerInfo.listening) | PID=$($listenerInfo.pid) | $($listenerInfo.process)")
 $lines.Add("")
@@ -290,6 +324,16 @@ $lines.Add("  pairs scanned:  $pairsScanned")
 $lines.Add("  eligible:       $eligible")
 $lines.Add("  history rows:   $historyRows")
 $lines.Add("  last error:     $rvLastError")
+$lines.Add("")
+$lines.Add("RV LIVE CANARY")
+$lines.Add("  armed:          $(Get-Prop (Get-Prop $rvLive 'policy') 'live_execution' $false)")
+$lines.Add("  evidence gate:  $(Get-Prop (Get-Prop $rvLive 'evidence') 'gate' $false)")
+$lines.Add("  closed pairs:   $(Get-Prop (Get-Prop $rvLive 'evidence') 'closed_pairs' 0)")
+$lines.Add("  net PnL CZK:    $(Fmt (Get-Prop (Get-Prop $rvLive 'evidence') 'net_pnl_czk'))")
+$lines.Add("  profit factor:  $(Fmt (Get-Prop (Get-Prop $rvLive 'evidence') 'profit_factor') 3)")
+$lines.Add("  max DD:         $(Fmt (Get-Prop (Get-Prop $rvLive 'evidence') 'max_drawdown_pct') 3)%")
+$lines.Add("  target/leg USD: $(Fmt (Get-Prop (Get-Prop $rvLive 'policy') 'target_notional_usd_per_leg') 2)")
+$lines.Add("  managed pairs:  $(@(Get-Prop $rvLive 'managed' @()).Count)")
 $lines.Add("")
 $lines.Add("PAPER")
 $lines.Add("  realized eq:    $(Fmt $realizedEquity) CZK")
