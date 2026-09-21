@@ -35,7 +35,7 @@ def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str
         if str(meta.get("status") or "online") != "online":
             continue
         base, quote = ws.split("/", 1)
-        if quote != "USD":
+        if quote not in {"USD","USDC"}:
             continue
         if base in {"USD","USDT","USDC","DAI","USDG","PYUSD","EUR"}:
             continue
@@ -60,6 +60,8 @@ def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str
             continue
         rows.append({
             "symbol": ws,
+            "base": base,
+            "quote": quote,
             "altname": alt,
             "turnover_24h_usd_proxy": turnover,
             "spread_bps": spread_bps,
@@ -68,8 +70,33 @@ def discover(max_pairs: int = 24, max_spread_bps: float = 20.0) -> list[dict[str
             "lot_decimals": meta.get("lot_decimals"),
         })
 
-    rows.sort(key=lambda x: (x["turnover_24h_usd_proxy"], -x["spread_bps"]), reverse=True)
-    return rows[:max_pairs]
+    # Rank by liquidity/spread, but for the same base prefer a USDC quote so
+    # existing USDC capital can be deployed without an extra conversion leg.
+    rows.sort(
+        key=lambda x: (
+            x["turnover_24h_usd_proxy"],
+            -x["spread_bps"],
+            1 if x.get("quote") == "USDC" else 0,
+        ),
+        reverse=True,
+    )
+    best_by_base: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        base = str(row.get("base") or "")
+        prev = best_by_base.get(base)
+        if prev is None:
+            best_by_base[base] = row
+            continue
+        # If a USDC market exists and is not materially worse on spread/liquidity,
+        # prefer it to avoid USDC->USD conversion churn.
+        if row.get("quote") == "USDC":
+            spread_ok = float(row["spread_bps"]) <= max(float(prev["spread_bps"]) * 1.35, float(prev["spread_bps"]) + 2.0)
+            liquidity_ok = float(row["turnover_24h_usd_proxy"]) >= float(prev["turnover_24h_usd_proxy"]) * 0.20
+            if spread_ok and liquidity_ok:
+                best_by_base[base] = row
+    picked = list(best_by_base.values())
+    picked.sort(key=lambda x: (x["turnover_24h_usd_proxy"], -x["spread_bps"]), reverse=True)
+    return picked[:max_pairs]
 
 
 def main() -> None:
