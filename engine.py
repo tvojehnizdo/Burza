@@ -33,6 +33,7 @@ from fx_breakout import (
     status as fx_breakout_status,
 )
 from fast_canary import scan as scan_fast_canary
+from futures_canary import public_scan as futures_canary_public_scan
 
 KRAKEN = "https://api.kraken.com"
 KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
@@ -623,6 +624,7 @@ small{color:#9aa9c7}
 <button onclick="go('/api/v4/relative-value')">Relative value</button>
 <button onclick="go('/api/v4/fx-breakout')">GBP/JPY Breakout Lab</button>
 <button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
+<button onclick="go('/api/v4/futures-canary')">Futures canary</button>
 <button onclick="go('/api/v4/stop','POST')">Stop</button>
 </div>
 <small>Directional alpha remains PAPER-only. Relative-value scanner searches PF/FF basis opportunities independently. GBP/JPY Breakout Lab is a separate PAPER research lane and does not share its ledger.</small>
@@ -1089,6 +1091,18 @@ def pulses():
         "all": out,
         "note": "Candidate scanner only; no real orders are submitted.",
     }
+
+
+@app.get("/api/v4/futures-canary")
+def v4_futures_canary():
+    try:
+        return futures_canary_public_scan()
+    except Exception as exc:
+        return {
+            "ready": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "actual_order_submitted": False,
+        }
 
 
 @app.get("/api/futures-pulses")
