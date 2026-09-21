@@ -6,7 +6,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -370,9 +370,8 @@ class RelativeValueRuntime:
 
 
 def selftest() -> dict[str, Any]:
-    future_date = (datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0))
-    # Ensure the synthetic maturity lands safely in the future.
-    future_date = future_date.replace(year=min(future_date.year + 1, 2099))
+    # Keep the synthetic maturity inside the scanner's configured max horizon.
+    future_date = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=90)
     code = future_date.strftime("%y%m%d")
     ff = f"FF_XBTUSD_{code}"
     instruments = [
