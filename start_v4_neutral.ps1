@@ -41,8 +41,19 @@ $env:RV_MAX_DAYS_TO_EXPIRY = "220"
 $env:RV_HISTORY_WINDOW = "500"
 $env:RV_DB = "data/relative_value.db"
 
+# Automatically exploit qualifying opportunities in isolated PAPER.
+$env:RV_PAPER_ENABLED = "1"
+$env:RV_PAPER_START_EQUITY = "5000"
+$env:RV_PAPER_ALLOC_PCT = "15"
+$env:RV_PAPER_MAX_OPEN = "2"
+$env:RV_PAPER_TAKE_BPS = "6"
+$env:RV_PAPER_STOP_BPS = "25"
+$env:RV_PAPER_MAX_HOLD_H = "24"
+$env:RV_PAPER_REENTRY_COOLDOWN_S = "300"
+
 Write-Host ""
 Write-Host "Primary strategy: PF/FF market-neutral relative value" -ForegroundColor Green
+Write-Host "Eligible opportunities: AUTO-EXECUTE in PAPER (two-leg)" -ForegroundColor Green
 Write-Host "Scanner cadence: 10 s" -ForegroundColor Green
 Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" -ForegroundColor Green
 Write-Host "Minimum residual edge: 8 bps (gross executable basis must clear ~20 bps)" -ForegroundColor Green
