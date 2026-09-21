@@ -217,3 +217,5 @@ A separate PAPER research lane for GBP/JPY. It keeps TECHNICAL and NEWS hypothes
 
 ### RV LIVE CANARY
 Relative Value live execution is a separately armed Kraken Derivatives bridge. New entries require the PAPER evidence gate (minimum 20 closed pairs, positive net PnL, profit factor >= 1.20, max drawdown <= 5%), Futures API trading permission with Transfer=NO_ACCESS, and a clean managed account state. The first stage is capped to one live pair and a small per-leg target notional. The two legs use equal base quantity. If the hedge leg fails, the bridge attempts immediate reduce-only compensation. DISARM blocks new entries first and preserves exit capability until managed exposure is closed.
+
+Explicit DISARM immediately attempts reduce-only flattening of managed exposure; if an exit fails, new entries remain blocked while the bridge keeps only the minimum live capability needed to retry the exit.
