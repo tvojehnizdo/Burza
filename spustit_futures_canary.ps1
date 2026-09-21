@@ -6,19 +6,12 @@ $Store = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
 
 function Secure-ToPlain([Security.SecureString]$Secure) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    }
-    finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 
 function Load-EncryptedPair([string]$Path) {
-    if (-not (Test-Path $Path)) {
-        return $null
-    }
-
+    if (-not (Test-Path $Path)) { return $null }
     $obj = Get-Content -Raw $Path | ConvertFrom-Json
     return @(
         (ConvertTo-SecureString -String ([string]$obj.api_key)),
@@ -26,162 +19,92 @@ function Load-EncryptedPair([string]$Path) {
     )
 }
 
-if (-not (Test-Path $Python)) {
-    throw "Python venv chybi. Spust start_v4_neutral.ps1."
-}
-
+if (-not (Test-Path $Python)) { throw "Python venv chybi." }
 $pair = Load-EncryptedPair $Store
-if (-not $pair) {
-    throw "Kraken Futures DPAPI credentials chybi: $Store. Spust prepare_futures.ps1."
-}
+if (-not $pair) { throw "Kraken Futures DPAPI credentials chybi: $Store" }
 
 $env:KRAKEN_FUTURES_API_KEY = Secure-ToPlain $pair[0]
 $env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $pair[1]
 
 try {
     Write-Host ""
-    Write-Host "FUTURES CANARY - ONE SHOT AUTO WATCH" -ForegroundColor Cyan
-    Write-Host "Max 1 LIVE pozice, hard cap 3 USD, dynamicky Kraken PF_*USD perpetual universe." -ForegroundColor Yellow
-    Write-Host "Po vstupu: reduce-only STOP + TAKE PROFIT." -ForegroundColor Yellow
-    Write-Host "Pokud ochrana selze, executor zkusi okamzite zplosteni." -ForegroundColor Yellow
+    Write-Host "FUTURES MICRO PORTFOLIO" -ForegroundColor Cyan
+    Write-Host "Max 4 ruzne pozice | cil ~2.25 USD | max 3 USD/pozice | portfolio max 10 USD / 50 % equity." -ForegroundColor Yellow
+    Write-Host "Kazdy vstup dostane reduce-only STOP + TAKE PROFIT." -ForegroundColor Yellow
     Write-Host ""
 
-    $arm = Read-Host "Pro jednorazove ozbrojeni napis presne ARM FUTURES CANARY"
-    if ($arm -ne "ARM FUTURES CANARY") {
-        Write-Host "Neozbrojeno. Nic LIVE se neposlalo." -ForegroundColor Yellow
-        exit 1
-    }
-
-    Write-Host ""
-    Write-Host "Kontroluji existujici Futures pozici a ochranu..." -ForegroundColor Cyan
     $rescueJson = & $Python "futures_canary.py" --rescue
-    if ($LASTEXITCODE -ne 0) {
-        throw "Rescue kontrola selhala."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Rescue kontrola selhala." }
     $rescueJson | Write-Host
+    $rescue = ($rescueJson -join [Environment]::NewLine) | ConvertFrom-Json
 
-    try {
-        $rescue = ($rescueJson -join [Environment]::NewLine) | ConvertFrom-Json
-    }
-    catch {
-        throw "Rescue vratil necitelny JSON."
-    }
-
-    if ([string]$rescue.reason -eq "EXISTING_POSITION_PROTECTED") {
-        Write-Host ""
-        Write-Host ("Existujici pozice " + [string]$rescue.symbol + " je nyni chranena STOP + TAKE PROFIT.") -ForegroundColor Green
-        Write-Host "Dalsi pozici neoteviram, dokud tato existuje." -ForegroundColor Green
-        exit 0
-    }
-
-    if ([string]$rescue.reason -eq "MULTIPLE_EXISTING_POSITIONS" -or [string]$rescue.reason -eq "RESCUE_FLATTEN_FAILED") {
-        Write-Host ("STOP: rescue reason=" + [string]$rescue.reason) -ForegroundColor Red
-        exit 2
-    }
-
-    if ([string]$rescue.reason -eq "EXISTING_POSITION_FLATTENED") {
-        Write-Host "Stara nekompletne chranena pozice byla zplostena. Pokracuji do noveho signalu." -ForegroundColor Yellow
+    if ([string]$rescue.reason -eq "TOO_MANY_EXISTING_POSITIONS" -or [string]$rescue.reason -eq "RESCUE_FLATTEN_FAILED") {
+        throw ("Rescue stop: " + [string]$rescue.reason)
     }
 
     $deadline = (Get-Date).AddMinutes(20)
-    $attempt = 0
 
     while ((Get-Date) -lt $deadline) {
-        $attempt++
-
         $planJson = & $Python "futures_canary.py" --plan
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Plan selhal, opakuji za 5 s..." -ForegroundColor Yellow
             Start-Sleep -Seconds 5
             continue
         }
 
-        try {
-            $plan = ($planJson -join [Environment]::NewLine) | ConvertFrom-Json
-        }
-        catch {
-            Write-Host "Plan JSON nesel precist, opakuji za 5 s..." -ForegroundColor Yellow
-            Start-Sleep -Seconds 5
-            continue
-        }
+        $plan = ($planJson -join [Environment]::NewLine) | ConvertFrom-Json
+        $openCount = 0
+        try { $openCount = [int]$plan.readiness.open_position_count } catch { $openCount = 0 }
 
-        if ([string]$plan.reason -eq "EXISTING_FUTURES_POSITION") {
-            Write-Host "STOP: uz existuje futures pozice. Nic dalsiho neposilam." -ForegroundColor Yellow
-            exit 2
+        if ([string]$plan.reason -eq "POSITION_SLOTS_FULL" -or $openCount -ge 4) {
+            Write-Host ("Portfolio naplneno: " + $openCount + "/4. Ochranny ordery zustavaji na burze.") -ForegroundColor Green
+            exit 0
         }
 
         if ($plan.ready -and [string]$plan.reason -eq "FUTURES_CANARY_EXECUTABLE") {
             Write-Host ""
             Write-Host (
-                "FOUND #" + $attempt +
-                ": " + [string]$plan.candidate.symbol +
+                "KANDIDAT: " + [string]$plan.candidate.symbol +
                 " " + [string]$plan.candidate.side +
                 " | notional ~$" + [math]::Round([double]$plan.candidate.estimated_notional_usd, 2) +
                 " | edge=" + [math]::Round([double]$plan.candidate.taker_net_edge_bps, 2) + " bps" +
-                " | stop=" + [math]::Round([double]$plan.candidate.stop_price, 4) +
-                " | take=" + [math]::Round([double]$plan.candidate.take_profit_price, 4)
+                " | stop=" + [math]::Round([double]$plan.candidate.stop_price, 6) +
+                " | take=" + [math]::Round([double]$plan.candidate.take_profit_price, 6)
             ) -ForegroundColor Green
 
+            $confirm = Read-Host "Pro tento dalsi LIVE mikro obchod napis presne SPUSTIT MICRO OBCHOD"
+            if ($confirm -ne "SPUSTIT MICRO OBCHOD") {
+                Write-Host "Tento vstup preskocen. Skript konci bez noveho orderu." -ForegroundColor Yellow
+                exit 1
+            }
+
             $execJson = & $Python "futures_canary.py" --execute --confirm SPUSTIT-FUTURES-CANARY
-            if ($LASTEXITCODE -ne 0) {
-                throw "Futures canary execute selhal."
-            }
-
+            if ($LASTEXITCODE -ne 0) { throw "Execute selhal." }
             $execJson | Write-Host
+            $execObj = ($execJson -join [Environment]::NewLine) | ConvertFrom-Json
 
-            try {
-                $execObj = ($execJson -join [Environment]::NewLine) | ConvertFrom-Json
-            }
-            catch {
-                throw "Execute vratil necitelny JSON."
-            }
-
-            if ($execObj.actual_order_submitted) {
-                Write-Host ""
-                Write-Host ("LIVE CANARY ODESLAN. reason=" + [string]$execObj.reason) -ForegroundColor Green
-                Write-Host "Dalsi obchod se v tomto behu neposle." -ForegroundColor Green
-                exit 0
+            if ($execObj.ok -and [string]$execObj.reason -eq "FUTURES_CANARY_LIVE_WITH_PROTECTION") {
+                Write-Host ("LIVE + OCHRANA OK: " + [string]$execObj.candidate.symbol) -ForegroundColor Green
+                Start-Sleep -Seconds 2
+                continue
             }
 
-            Write-Host (
-                "Signal pri execute zmizel nebo nebyl proveditelny: " +
-                [string]$execObj.reason +
-                ". Pokracuji v cekani."
-            ) -ForegroundColor Yellow
-        }
-        else {
-            $best = $plan.public_scan.candidate
-
-            if ($null -ne $best) {
-                $edge = 0.0
-                try {
-                    $edge = [double]$best.taker_net_edge_bps
-                }
-                catch {
-                    $edge = 0.0
-                }
-
-                Write-Host (
-                    "[" + (Get-Date -Format "HH:mm:ss") + "] cekam" +
-                    " | reason=" + [string]$plan.reason +
-                    " | best=" + [string]$best.symbol +
-                    " " + [string]$best.side +
-                    " | edge=" + [math]::Round($edge, 2) + " bps"
-                ) -ForegroundColor DarkGray
-            }
-            else {
-                Write-Host (
-                    "[" + (Get-Date -Format "HH:mm:ss") + "] cekam" +
-                    " | reason=" + [string]$plan.reason
-                ) -ForegroundColor DarkGray
-            }
+            Write-Host ("Novy trade nebyl ponechan otevreny: " + [string]$execObj.reason) -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+            continue
         }
 
+        $best = $plan.public_scan.candidate
+        $msg = "[" + (Get-Date -Format "HH:mm:ss") + "] " + [string]$plan.reason + " | open=" + $openCount + "/4"
+        if ($null -ne $best) {
+            $edge = 0.0
+            try { $edge = [double]$best.taker_net_edge_bps } catch { $edge = 0.0 }
+            $msg += " | best=" + [string]$best.symbol + " " + [string]$best.side + " edge=" + [math]::Round($edge, 2) + "bps"
+        }
+        Write-Host $msg -ForegroundColor DarkGray
         Start-Sleep -Seconds 5
     }
 
-    Write-Host "20 minut bez executable signalu. Nic LIVE se neposlalo." -ForegroundColor Yellow
-    exit 3
+    Write-Host "20 minut bez dalsiho potvrzeneho executable vstupu. Koncim; otevrene ochrany zustavaji na burze." -ForegroundColor Yellow
 }
 finally {
     Remove-Item Env:KRAKEN_FUTURES_API_KEY,Env:KRAKEN_FUTURES_API_SECRET -ErrorAction SilentlyContinue
