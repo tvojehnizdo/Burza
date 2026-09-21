@@ -229,3 +229,6 @@ Status reporting now shows private Kraken account capital separately from PAPER 
 
 ### Sequential hunter validation
 The neutral profile now records a 12-pair spot microstructure universe and runs one SHADOW trade at a time using only cost-positive candidates, plus one sequential futures-maker economic proxy trade at a time. Both lanes remain PAPER/SHADOW only.
+
+### USDC dynamic universe validation
+Neutral hunter discovers liquid USD/USDC spot markets at startup, prefers direct USDC routes when economically comparable, and retains BTC/USD as the model reference pair.
