@@ -235,3 +235,6 @@ Dashboard exposes a read-only executable-candidate gate that requires a current 
 
 ### Fast canary validation
 A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fallback executable candidate when learned microstructure has no cost-positive state. It remains read-only and never submits an order.
+
+### USDC consolidation validation
+A guarded local consolidation workflow plans and validates asset-to-USDC conversions, executes only Kraken Pro-eligible direct USDC sells after explicit confirmation, and leaves below-minimum balances for Kraken Convert/small-balance handling.
