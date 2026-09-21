@@ -210,3 +210,6 @@ Relative-value entries now require a rolling basis history and a >=2-sigma devia
 
 ### FAST PAPER profile
 The neutral V2 runner can use a faster PAPER-only profile: 5 s scanning, 1.5-sigma entry, 5 bps minimum modeled net edge, up to 3 simultaneous pairs, 4 h max hold, and 180 s re-entry cooldown. Cost assumptions are unchanged.
+
+### GBP/JPY Breakout Lab
+A separate PAPER research lane for GBP/JPY. It keeps TECHNICAL and NEWS hypotheses separate, stores observed broker bid/ask quotes in data/gbpjpy_breakout.db, tracks actual spread observations, and requires explicit news timestamps. It intentionally does not invent slippage, win-rate, or broker-liquidity statistics. Until a real broker feed is connected it remains DATA_COLLECTION_ONLY. LIVE orders are disabled.
