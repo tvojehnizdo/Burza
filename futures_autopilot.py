@@ -47,7 +47,7 @@ NO_PROGRESS_CURRENT_BPS = 22.0
 
 ADOPT_STOP_BPS = 45.0
 ADOPT_TAKE_BPS = 45.0
-MAX_SESSION_DRAWDOWN_PCT = 10.0
+MAX_SESSION_DRAWDOWN_PCT = 50.0
 MAX_CONSECUTIVE_ERRORS = 5
 
 
@@ -417,6 +417,81 @@ def _exit_reason(age_sec: float, pnl_bps: float, max_fav_bps: float) -> str | No
     return None
 
 
+def _flatten_all_positions(client: Any, state: dict[str, Any], reason: str) -> dict[str, Any]:
+    rows = _position_rows_map(client.open_positions())
+    results: list[dict[str, Any]] = []
+
+    for symbol, row in rows.items():
+        signed = _signed_size(row)
+        size = round_size_down(symbol, abs(signed))
+        exit_side = "sell" if signed > 0 else "buy"
+
+        cancelled = cancel_symbol_orders(client, symbol, reduce_only_only=True)
+
+        save_policy(_policy_patch(True))
+        try:
+            close = place_order(
+                symbol,
+                exit_side,
+                size,
+                reduce_only=True,
+                order_type="mkt",
+                cli_ord_id=f"kb{_now_ms()}",
+            )
+        finally:
+            save_policy(_policy_patch(False))
+
+        gone = False
+        for _ in range(20):
+            time.sleep(0.25)
+            if symbol not in _position_rows_map(client.open_positions()):
+                gone = True
+                break
+
+        cleanup = cancel_symbol_orders(client, symbol, reduce_only_only=True)
+        if gone:
+            state["positions"].pop(symbol, None)
+
+        results.append({
+            "symbol": symbol,
+            "closed": gone,
+            "close": close,
+            "cancelled_before": cancelled,
+            "cleanup": cleanup,
+        })
+
+    result = {
+        "ok": all(bool(x.get("closed")) for x in results) if results else True,
+        "reason": reason,
+        "positions": results,
+    }
+    _log({"event": "ACCOUNT_KILL_SWITCH", **result})
+    return result
+
+
+def _drawdown_guard(client: Any, state: dict[str, Any]) -> dict[str, Any] | None:
+    snap = _portfolio_snapshot(client)
+    equity = float(snap["equity_usd"])
+    start = state.get("session_start_equity")
+
+    if start is None or float(start) <= 0:
+        state["session_start_equity"] = equity
+        return None
+
+    threshold = float(start) * (1.0 - MAX_SESSION_DRAWDOWN_PCT / 100.0)
+    if equity > threshold:
+        return None
+
+    result = _flatten_all_positions(client, state, "MAX_SESSION_DRAWDOWN")
+    result.update({
+        "equity_usd": equity,
+        "session_start_equity": float(start),
+        "drawdown_pct_limit": MAX_SESSION_DRAWDOWN_PCT,
+        "threshold_equity_usd": threshold,
+    })
+    return result
+
+
 def _manage_positions(client: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
     positions_payload = client.open_positions()
     orders_payload = client.open_orders()
@@ -476,9 +551,20 @@ def run_forever() -> None:
     state = _load_state()
     client = client_from_env()
     save_policy(_policy_patch(False))
+
+    # The user's 50% max-loss budget starts fresh when the manager is armed.
+    initial = _portfolio_snapshot(client)
+    state["session_start_equity"] = float(initial["equity_usd"])
+    _save_state(state)
+
     errors = 0
 
-    _log({"event": "LIVE_MANAGER_START", "pid": os.getpid()})
+    _log({
+        "event": "LIVE_MANAGER_START",
+        "pid": os.getpid(),
+        "session_start_equity": state["session_start_equity"],
+        "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
+    })
     print("FUTURES LIVE MANAGER: armed")
     print(
         f"manage_open_positions_only=true | "
@@ -487,6 +573,15 @@ def run_forever() -> None:
 
     while True:
         try:
+            guard = _drawdown_guard(client, state)
+            if guard is not None:
+                _save_state(state)
+                print(
+                    f"KILL SWITCH: equity drawdown reached {MAX_SESSION_DRAWDOWN_PCT:.0f}%. "
+                    f"Flatten attempted. Manager stops."
+                )
+                return
+
             actions = _manage_positions(client, state)
             snap = _portfolio_snapshot(client)
             _save_state(state)
