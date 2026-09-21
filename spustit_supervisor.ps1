@@ -16,8 +16,8 @@ function Load-EncryptedPair([string]$Path) {
     if (-not (Test-Path $Path)) { return $null }
     $obj = Get-Content -Raw $Path | ConvertFrom-Json
     return @(
-        ConvertTo-SecureString ([string]$obj.api_key),
-        ConvertTo-SecureString ([string]$obj.api_secret)
+        (ConvertTo-SecureString -String ([string]$obj.api_key)),
+        (ConvertTo-SecureString -String ([string]$obj.api_secret))
     )
 }
 
@@ -36,7 +36,7 @@ function Load-OpenAIKey {
     if (-not (Test-Path $OpenAIStore)) { return $null }
     try {
         $obj = Get-Content -Raw $OpenAIStore | ConvertFrom-Json
-        return ConvertTo-SecureString ([string]$obj.openai_api_key)
+        return (ConvertTo-SecureString -String ([string]$obj.openai_api_key))
     } catch { return $null }
 }
 

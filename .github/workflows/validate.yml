@@ -30,6 +30,17 @@ jobs:
           }
       - shell: pwsh
         run: |
+          $k = ConvertTo-SecureString "dummy-key-123456789" -AsPlainText -Force
+          $s = ConvertTo-SecureString "dummy-secret-12345678901234567890" -AsPlainText -Force
+          $obj = [ordered]@{ api_key = ConvertFrom-SecureString $k; api_secret = ConvertFrom-SecureString $s }
+          $pair = @(
+            (ConvertTo-SecureString -String ([string]$obj.api_key)),
+            (ConvertTo-SecureString -String ([string]$obj.api_secret))
+          )
+          if ($pair.Count -ne 2) { throw "DPAPI pair load failed" }
+          Write-Host "DPAPI pair load pattern OK"
+      - shell: pwsh
+        run: |
           @'
           # KRAKEN
           $env:KRAKEN_API_KEY = "dummy-key"
