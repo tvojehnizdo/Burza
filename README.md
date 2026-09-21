@@ -81,3 +81,28 @@ The readiness script:
 - reports actual_order_submitted=false
 
 This step does not place a live trade. It establishes whether the account/API path is technically ready and whether the no-withdraw boundary is enforced by the API key itself.
+
+
+## One-click complete setup
+
+If the Vault is not machine-readable or any Kraken credential is missing, use the interactive PowerShell wizard:
+
+    cd C:\Burza
+    git pull
+    .\spustit_vse.ps1
+
+The wizard:
+- updates the repo with fast-forward only
+- creates/repairs the Python environment and dependencies
+- starts V4 automatically if it is not already running
+- tries the existing Vault without exposing values
+- if credentials are missing/invalid, asks for API key and secret directly in PowerShell with hidden input
+- optionally stores both locally encrypted with Windows DPAPI (current Windows user)
+- validates Kraken authentication and reads balances, margin state, open orders and open positions
+- requires Query Funds, Query Open Orders & Trades, Create/Modify Orders, Cancel/Close Orders and WebSocket interface
+- blocks if Withdraw Funds or withdrawal-address administration is enabled
+- validates a 2x margin AddOrder path with validate=true, so no real order enters the matching engine
+- opens Kraken API settings and waits for the user to fix permissions if necessary, then retries automatically
+- leaves V4 running and writes reports/kraken-readiness-latest.json
+
+This wizard deliberately stops at private API readiness. The current V4 engine still reports live_orders=false; actual live order routing is a separate final activation layer.
