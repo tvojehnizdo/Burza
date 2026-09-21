@@ -43,7 +43,13 @@ Start-Process pwsh.exe -ArgumentList "-NoExit","-ExecutionPolicy","Bypass","-Fil
 Write-Host ""
 Write-Host "KOMPLETNI SYSTÉM SPUŠTĚN." -ForegroundColor Green
 Write-Host "V4:          http://127.0.0.1:8765" -ForegroundColor Green
-Write-Host "AI Supervisor: http://127.0.0.1:8770" -ForegroundColor Green
+$portFile = Join-Path $PSScriptRoot "reports\ai-supervisor-port.txt"
+$supervisorText = "AI Supervisor: automaticky vybraný volný port (8771-8799)"
+if (Test-Path $portFile) {
+    $p = (Get-Content -Raw $portFile).Trim()
+    if ($p) { $supervisorText = "AI Supervisor: http://127.0.0.1:$p" }
+}
+Write-Host $supervisorText -ForegroundColor Green
 Write-Host ""
 Write-Host "Spot/margin trading API: připraveno." -ForegroundColor Green
 Write-Host "Futures trading API: podle samostatného Futures key." -ForegroundColor Green
