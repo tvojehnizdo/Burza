@@ -5,3 +5,4 @@ pandas==2.2.3
 numpy==2.2.1
 websockets==17.1
 python-dotenv==1.2.3
+openai==1.109.1
