@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install -r requirements.txt
-      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py kraken_inventory.py dynamic_universe.py fast_canary.py consolidate_usdc.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py futures_canary.py futures_autopilot.py futures_session.py ai_supervisor.py live_bridge.py
+      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py kraken_inventory.py dynamic_universe.py fast_canary.py consolidate_usdc.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py futures_canary.py futures_autopilot.py futures_session.py futures_audit.py ai_supervisor.py live_bridge.py
       - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python v4_smoke.py | tee v4-smoke.json
       - run: python -c "import kraken_private, json; r=kraken_private.signature_selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
@@ -29,7 +29,7 @@ jobs:
       - run: python -c "import futures_session, json; r=futures_session.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - shell: pwsh
         run: |
-          foreach ($f in @("./spustit_vse.ps1","./start_v4_neutral.ps1","./start_v4_aggressive.ps1","./prepare_futures.ps1","./spustit_supervisor.ps1","./spustit_komplet.ps1","./arm_live.ps1","./disarm_live.ps1","./arm_rv_live.ps1","./disarm_rv_live.ps1","./spustit_rv_live.ps1","./spustit_futures_canary.ps1","./spustit_futures_batch.ps1","./spustit_futures_session.ps1","./spustit_futures_manager.ps1","./stav_impulse.ps1")) {
+          foreach ($f in @("./spustit_vse.ps1","./start_v4_neutral.ps1","./start_v4_aggressive.ps1","./prepare_futures.ps1","./spustit_supervisor.ps1","./spustit_komplet.ps1","./arm_live.ps1","./disarm_live.ps1","./arm_rv_live.ps1","./disarm_rv_live.ps1","./spustit_rv_live.ps1","./spustit_futures_canary.ps1","./spustit_futures_batch.ps1","./spustit_futures_session.ps1","./spustit_futures_manager.ps1","./audit_futures.ps1","./stav_impulse.ps1")) {
             $null = [scriptblock]::Create((Get-Content -Raw $f))
             Write-Host "$f syntax OK"
           }
