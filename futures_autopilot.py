@@ -48,6 +48,7 @@ NO_PROGRESS_CURRENT_BPS = 22.0
 ADOPT_STOP_BPS = 45.0
 ADOPT_TAKE_BPS = 45.0
 MAX_SESSION_DRAWDOWN_PCT = 50.0
+SESSION_CAPITAL_USD = 22.0
 MAX_CONSECUTIVE_ERRORS = 5
 
 
@@ -478,7 +479,9 @@ def _drawdown_guard(client: Any, state: dict[str, Any]) -> dict[str, Any] | None
         state["session_start_equity"] = equity
         return None
 
-    threshold = float(start) * (1.0 - MAX_SESSION_DRAWDOWN_PCT / 100.0)
+    allocated = min(SESSION_CAPITAL_USD, float(start))
+    max_loss_usd = allocated * MAX_SESSION_DRAWDOWN_PCT / 100.0
+    threshold = float(start) - max_loss_usd
     if equity > threshold:
         return None
 
@@ -486,6 +489,8 @@ def _drawdown_guard(client: Any, state: dict[str, Any]) -> dict[str, Any] | None
     result.update({
         "equity_usd": equity,
         "session_start_equity": float(start),
+        "session_capital_usd": allocated,
+        "max_loss_usd": max_loss_usd,
         "drawdown_pct_limit": MAX_SESSION_DRAWDOWN_PCT,
         "threshold_equity_usd": threshold,
     })
@@ -654,6 +659,7 @@ def selftest() -> dict[str, Any]:
             and MAX_OPEN_POSITIONS == 4
         ),
         "drawdown_limit_is_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "capital_budget_is_22": SESSION_CAPITAL_USD == 22.0,
     }
     return {"ok": all(checks.values()), "checks": checks}
 
