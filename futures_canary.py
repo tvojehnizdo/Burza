@@ -245,6 +245,7 @@ def private_plan() -> dict[str, Any]:
     candidates = [x for x in scan.get("all", []) if x.get("canary_signal_ready")]
     client = client_from_env()
     executable: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
 
     for p in candidates:
         symbol = str(p["symbol"]).upper()
@@ -253,11 +254,35 @@ def private_plan() -> dict[str, Any]:
         size = round_size_down(symbol, raw_size)
         minimum = min_lot(symbol)
         if size < minimum:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "BELOW_MIN_LOT_AFTER_CAP",
+                "price": px,
+                "equity_usd": equity,
+                "notional_cap_usd": notional_cap,
+                "raw_size": raw_size,
+                "rounded_size": size,
+                "min_lot": minimum,
+                "minimum_lot_notional_usd": minimum * px,
+                "signal_net_edge_bps": p.get("taker_net_edge_bps"),
+            })
             continue
         side = "buy" if str(p.get("side")).upper() == "LONG" else "sell"
         try:
             pre = order_preflight(symbol, side, size, reduce_only=False, client=client)
         except Exception as exc:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "PREFLIGHT_REJECTED",
+                "error": f"{type(exc).__name__}: {exc}",
+                "price": px,
+                "equity_usd": equity,
+                "notional_cap_usd": notional_cap,
+                "size": size,
+                "estimated_notional_usd": size * px,
+                "min_lot": minimum,
+                "signal_net_edge_bps": p.get("taker_net_edge_bps"),
+            })
             continue
 
         atr_frac = max(float(p.get("atr_pct") or 0.0) / 100.0, 0.0001)
@@ -299,6 +324,7 @@ def private_plan() -> dict[str, Any]:
         "reason": "FUTURES_CANARY_EXECUTABLE" if executable else "SIGNAL_EXISTS_BUT_NOT_EXECUTABLE",
         "candidate": executable[0] if executable else None,
         "alternatives": executable[1:],
+        "rejected_candidates": rejected,
         "public_scan": scan,
         "readiness": r,
         "policy_target": {
