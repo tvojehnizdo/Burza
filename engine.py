@@ -662,10 +662,24 @@ def v4_paper():
                       net_bps,state_key,status
                FROM paper_trades ORDER BY id DESC LIMIT 100"""
         ).fetchall()
+        shadow_rows = con.execute(
+            """SELECT id,opened_ms,closed_ms,symbol,side,horizon_s,entry,exit,
+                      notional_czk,signal_edge_bps,signal_score,cost_bps,pnl_czk,
+                      net_bps,state_key,signal_kind,status
+               FROM shadow_paper_trades ORDER BY id DESC LIMIT 100"""
+        ).fetchall()
     cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
             "notional_czk","model_edge_bps","model_score","cost_bps","pnl_czk",
             "net_bps","state_key","status"]
-    return {"trades": [dict(zip(cols, r)) for r in rows], "live_orders": False}
+    shadow_cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
+                   "notional_czk","signal_edge_bps","signal_score","cost_bps","pnl_czk",
+                   "net_bps","state_key","signal_kind","status"]
+    return {
+        "trades": [dict(zip(cols, r)) for r in rows],
+        "shadow_trades": [dict(zip(shadow_cols, r)) for r in shadow_rows],
+        "shadow_counts_for_live_gate": False,
+        "live_orders": False,
+    }
 
 
 @app.get("/api/selftest")
