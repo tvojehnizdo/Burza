@@ -81,10 +81,12 @@ def full_history(root: Path, keep_parts: bool = False) -> None:
     print(f"sha256={digest}")
     if digest.lower() != FULL_SHA256.lower():
         raise SystemExit("SHA256 mismatch; archive not extracted.")
-    extract(archive, root / "full")
+    # Once the joined archive is verified, the individual parts are redundant.
+    # Remove them before extraction to keep peak disk usage materially lower.
     if not keep_parts:
         for p in parts:
             p.unlink(missing_ok=True)
+    extract(archive, root / "full")
     print("Full Kraken OHLCVT history ready.")
 
 
