@@ -181,8 +181,9 @@ def pulse_logic(row: pd.Series) -> dict[str, Any]:
     }
 
 
-def per_side_cost_rate() -> float:
-    return (MAKER_FEE_BPS + SLIPPAGE_BPS + EXECUTION_PENALTY_BPS) / 10000.0
+def per_side_cost_rate(market: str = "spot") -> float:
+    maker = FUTURES_MAKER_FEE_BPS if market == "futures" else SPOT_MAKER_FEE_BPS
+    return (maker + SLIPPAGE_BPS + EXECUTION_PENALTY_BPS) / 10000.0
 
 
 def live_pulse(symbol: str) -> dict[str, Any] | None:
