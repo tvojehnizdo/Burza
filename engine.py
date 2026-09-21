@@ -729,7 +729,7 @@ def v4_fast_canary():
             max_spread_bps=25.0,
             maker_fee_bps_per_side=SPOT_MAKER_FEE_BPS,
             execution_buffer_bps=4.0,
-            min_net_edge_bps=5.0,
+            min_net_edge_bps=1.0,
         )
     except Exception as exc:
         return {
