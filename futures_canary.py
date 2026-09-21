@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -25,7 +26,9 @@ from futures_private import (
     save_policy,
 )
 
-MAX_UNIVERSE = 32
+MAX_UNIVERSE = 20
+UNIVERSE_PREFILTER = 48
+MAX_UNIVERSE_SPREAD_BPS = 30.0
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
 # Tier-1 Futures taker fee 5 bps/side + conservative 2 bps slippage
@@ -153,12 +156,51 @@ def _signal(symbol: str) -> dict[str, Any]:
     }
 
 
+def _volatility_profile(symbol: str) -> dict[str, float]:
+    df = _candles(symbol, 90)
+    if len(df) < 45:
+        raise RuntimeError(f"Insufficient candles for volatility profile {symbol}")
+
+    close = df["close"]
+    last = float(close.iloc[-1])
+    prev = close.shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev).abs(),
+        (df["low"] - prev).abs(),
+    ], axis=1).max(axis=1)
+
+    atr14 = float(tr.tail(14).mean())
+    median_range = float((df["high"] - df["low"]).tail(30).median())
+    rets = close.pct_change().dropna().tail(60)
+    realized = float(rets.std(ddof=0)) if len(rets) else 0.0
+
+    atr_bps = atr14 / last * 10000.0 if last > 0 else 0.0
+    median_range_bps = median_range / last * 10000.0 if last > 0 else 0.0
+    realized_bps = realized * 10000.0
+
+    # Primary preference: naturally wide candles. Realized volatility is a
+    # secondary confirmation so one isolated wick does not dominate ranking.
+    volatility_score = (
+        atr_bps * 0.55
+        + median_range_bps * 0.30
+        + realized_bps * 0.15
+    )
+    return {
+        "atr_bps": atr_bps,
+        "median_range_bps": median_range_bps,
+        "realized_bps": realized_bps,
+        "volatility_score": volatility_score,
+    }
+
+
 def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
     specs = instrument_specs()
     r = requests.get("https://futures.kraken.com/derivatives/api/v3/tickers", timeout=20)
     r.raise_for_status()
     rows = r.json().get("tickers") or []
-    ranked: list[tuple[float, str]] = []
+
+    eligible: list[dict[str, Any]] = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -166,6 +208,7 @@ def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
         spec = specs.get(symbol) or {}
         if not symbol.startswith("PF_") or not symbol.endswith("USD") or not bool(spec.get("tradeable")):
             continue
+
         try:
             bid = float(row.get("bid") or 0.0)
             ask = float(row.get("ask") or 0.0)
@@ -173,24 +216,74 @@ def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
             continue
         if bid <= 0 or ask < bid:
             continue
+
         mid = (bid + ask) / 2.0
+        spread_bps = ((ask - bid) / mid * 10000.0) if mid > 0 else 9999.0
+        if spread_bps > MAX_UNIVERSE_SPREAD_BPS:
+            continue
+
         try:
-            min_notional = float(spec.get("qty_step") or 0.0) * mid * float(spec.get("contract_size") or 1.0)
+            min_notional = (
+                float(spec.get("qty_step") or 0.0)
+                * mid
+                * float(spec.get("contract_size") or 1.0)
+            )
         except Exception:
             min_notional = 999999.0
         if min_notional <= 0 or min_notional > MAX_NOTIONAL_USD:
             continue
+
         liquidity = 0.0
         for key in ("volumeQuote", "volume24h", "volume", "openInterest"):
             try:
                 liquidity = max(liquidity, float(row.get(key) or 0.0))
             except Exception:
                 pass
-        spread_bps = ((ask - bid) / mid * 10000.0) if mid > 0 else 9999.0
-        score = liquidity - spread_bps * 1000.0
-        ranked.append((score, symbol))
-    ranked.sort(reverse=True)
-    return [s for _, s in ranked[:max_symbols]]
+
+        # First stage prevents low-liquidity junk from entering the expensive
+        # candle-volatility ranking.
+        liquidity_score = liquidity / max(1.0, 1.0 + spread_bps)
+        eligible.append({
+            "symbol": symbol,
+            "liquidity": liquidity,
+            "spread_bps": spread_bps,
+            "liquidity_score": liquidity_score,
+        })
+
+    eligible.sort(key=lambda x: float(x["liquidity_score"]), reverse=True)
+    prefiltered = eligible[:UNIVERSE_PREFILTER]
+
+    profiled: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(prefiltered)))) as pool:
+        futures = {
+            pool.submit(_volatility_profile, str(row["symbol"])): row
+            for row in prefiltered
+        }
+        for fut in as_completed(futures):
+            row = futures[fut]
+            try:
+                vol = fut.result()
+            except Exception:
+                continue
+
+            spread_penalty = 1.0 + float(row["spread_bps"]) / 12.0
+            liquidity_bonus = 1.0
+            if float(row["liquidity"]) > 0:
+                # Small liquidity bonus only; volatility remains dominant.
+                liquidity_bonus += min(0.20, math.log10(1.0 + float(row["liquidity"])) / 50.0)
+
+            final_score = float(vol["volatility_score"]) * liquidity_bonus / spread_penalty
+            profiled.append({**row, **vol, "final_score": final_score})
+
+    profiled.sort(
+        key=lambda x: (
+            float(x["final_score"]),
+            float(x["atr_bps"]),
+            -float(x["spread_bps"]),
+        ),
+        reverse=True,
+    )
+    return [str(x["symbol"]) for x in profiled[:max_symbols]]
 
 
 def _log(event: dict[str, Any]) -> None:
@@ -232,7 +325,7 @@ def public_scan() -> dict[str, Any]:
         "round_trip_taker_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "min_net_edge_bps": MIN_TAKER_NET_EDGE_BPS,
         "actual_order_submitted": False,
-        "note": "Dynamic Kraken PF_* perpetual universe; 1m momentum/ATR screen with taker-cost gating.",
+        "note": "Dynamic TOP-20 Kraken PF_*USD universe ranked primarily by normalized candle volatility (ATR/median range/realized vol), with liquidity, spread and min-lot gates.",
     }
 
 
