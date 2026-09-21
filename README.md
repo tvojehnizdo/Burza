@@ -106,3 +106,88 @@ The wizard:
 - leaves V4 running and writes reports/kraken-readiness-latest.json
 
 This wizard deliberately stops at private API readiness. The current V4 engine still reports live_orders=false; actual live order routing is a separate final activation layer.
+
+
+## Complete control architecture
+
+Run:
+
+    cd C:\Burza
+    git pull
+    .\spustit_komplet.ps1
+
+This orchestrates:
+
+1. Spot/margin readiness using the encrypted IMPULSE_V4 key.
+2. Optional Kraken Unified Wallet activation in Kraken Pro.
+3. Optional separate Futures API key:
+   - General API = FULL ACCESS
+   - Transfer/Withdrawal API = NO ACCESS
+4. Local OpenAI AI Supervisor on http://127.0.0.1:8770.
+5. Existing V4 Pulse Engine on http://127.0.0.1:8765.
+
+### Why Unified Wallet
+Kraken Unified Wallet combines eligible Spot, Margin and Multi-M Futures collateral in one balance. This is preferred over giving the API key Withdraw Funds just to call legacy Spot<->Futures WalletTransfer. The system therefore does not implement any withdrawal or wallet-transfer endpoint.
+
+### AI Supervisor
+The AI supervisor can inspect:
+- V4 recorder/alpha status
+- paper/consensus models
+- Kraken balances, margin, orders and positions
+- Futures readiness if a Futures key is configured
+- local execution policy
+
+It may directly:
+- start/stop V4
+- cancel all spot/margin orders
+- arm a Futures dead-man switch
+- lower allowed leverage or order-size policy
+- disable live execution
+
+It may NOT:
+- enable live execution
+- enable or use withdrawals
+- call wallet-transfer endpoints
+- increase leverage or risk above the current policy
+- invent trades outside the deterministic Pulse Engine
+
+### Execution control
+kraken_live_control.py provides the actual Spot/Margin order adapter. It uses Kraken AddOrder and stays validate-only unless the local policy file explicitly has live_execution=true.
+
+futures_private.py provides the Futures private API adapter. It verifies:
+- General API permission = FULL_ACCESS
+- Transfer permission = NO_ACCESS
+
+The Futures adapter arms cancelallordersafter (dead-man switch) before live Futures orders.
+
+### OpenAI key
+The local supervisor needs OPENAI_API_KEY. The launcher asks for it locally and can store it with Windows DPAPI. Never paste API keys into chat.
+
+
+## Live bridge
+
+The AI Supervisor process also starts a deterministic live bridge. It watches V4 PAPER signals and can mirror them to Kraken Spot/Margin only when BOTH of these are true:
+
+- the local execution policy has live_execution=true
+- the paper evidence gate has passed
+
+Default evidence gate:
+- at least 20 closed PAPER trades
+- net PAPER P/L >= 1 CZK
+- win rate >= 52%
+
+Until then, the bridge runs shadow/validate-only and will not submit a real order.
+
+Manual final activation:
+
+    .\arm_live.ps1
+
+This refuses to arm until the evidence gate passes and then requires typing ARM locally.
+
+Emergency stop:
+
+    .\disarm_live.ps1
+
+The AI Supervisor may DISARM live execution, lower leverage/risk, cancel orders and trigger a Futures dead-man switch. It may never arm LIVE itself.
+
+External withdrawals remain unavailable because the trading keys deliberately omit withdrawal/transfer access.
