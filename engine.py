@@ -21,6 +21,7 @@ from alpha_discovery import (
     SHADOW_HORIZONS,
 )
 from microstructure import KrakenMicroRecorder
+from relative_value import RelativeValueRuntime, scan_opportunities as scan_relative_value
 
 KRAKEN = "https://api.kraken.com"
 KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
@@ -37,10 +38,11 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-ENGINE_BUILD = "4.2-futures-maker-proxy"
+ENGINE_BUILD = "4.3-relative-value-neutral"
 app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version=ENGINE_BUILD)
 RECORDER = KrakenMicroRecorder()
 ALPHA_RUNTIME = AlphaRuntime()
+RELATIVE_VALUE_RUNTIME = RelativeValueRuntime()
 AUTO_RECORD = os.getenv("AUTO_RECORD", "1").lower() in {"1","true","yes","on"}
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "ImpulseMax5K/2.0"})
@@ -579,10 +581,12 @@ def v4_startup():
     if AUTO_RECORD:
         RECORDER.start()
         ALPHA_RUNTIME.start()
+        RELATIVE_VALUE_RUNTIME.start()
 
 
 @app.on_event("shutdown")
 def v4_shutdown():
+    RELATIVE_VALUE_RUNTIME.stop()
     ALPHA_RUNTIME.stop()
     RECORDER.stop()
 
@@ -603,10 +607,11 @@ small{color:#9aa9c7}
 <button onclick="go('/api/v4/start','POST')">Start recorder + alpha</button>
 <button onclick="go('/api/v4/models')">Alpha models</button>
 <button onclick="go('/api/v4/paper')">Paper ledger</button>
+<button onclick="go('/api/v4/relative-value')">Relative value</button>
 <button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
 <button onclick="go('/api/v4/stop','POST')">Stop</button>
 </div>
-<small>Decision cadence 30 s; market data is recorded continuously at ~1 s snapshots. A trade is not forced when no validated edge exists.</small>
+<small>Directional alpha remains PAPER-only. Relative-value scanner searches PF/FF basis opportunities independently and never submits orders.</small>
 <pre id='o'>Ready.</pre>
 <script>
 async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,{method:m});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=String(e)}}
@@ -625,6 +630,7 @@ def health():
         "alpha_cost_bps": ALPHA_COST_BPS,
         "validated_horizons": list(VALIDATED_HORIZONS),
         "shadow_horizons": list(SHADOW_HORIZONS),
+        "relative_value": RELATIVE_VALUE_RUNTIME.status(),
         "live_orders": False,
     }
 
@@ -633,20 +639,27 @@ def health():
 def v4_start():
     r1 = RECORDER.start()
     r2 = ALPHA_RUNTIME.start()
+    r3 = RELATIVE_VALUE_RUNTIME.start()
     return {
         "ok": True,
         "recorder_started": r1,
         "alpha_started": r2,
-        "status": {"recorder": RECORDER.status(), "alpha": ALPHA_RUNTIME.status()},
+        "relative_value_started": r3,
+        "status": {
+            "recorder": RECORDER.status(),
+            "alpha": ALPHA_RUNTIME.status(),
+            "relative_value": RELATIVE_VALUE_RUNTIME.status(),
+        },
         "live_orders": False,
     }
 
 
 @app.post("/api/v4/stop")
 def v4_stop():
+    RELATIVE_VALUE_RUNTIME.stop()
     ALPHA_RUNTIME.stop()
     RECORDER.stop()
-    return {"ok": True, "message": "V4 recorder/alpha stop requested", "live_orders": False}
+    return {"ok": True, "message": "V4 recorder/alpha/relative-value stop requested", "live_orders": False}
 
 
 @app.get("/api/v4/status")
@@ -656,6 +669,7 @@ def v4_status():
         "build": ENGINE_BUILD,
         "recorder": RECORDER.status(),
         "alpha": ALPHA_RUNTIME.status(),
+        "relative_value": RELATIVE_VALUE_RUNTIME.status(),
         "decision_interval_s": int(os.getenv("ALPHA_INTERVAL_S", "30")),
         "execution_mode": EXECUTION_MODE,
         "alpha_cost_bps": ALPHA_COST_BPS,
@@ -674,6 +688,16 @@ def v4_models():
         if ALPHA_RUNTIME.last_models is not None:
             return ALPHA_RUNTIME.last_models
         return discover_models()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
+
+
+@app.get("/api/v4/relative-value")
+def v4_relative_value():
+    try:
+        if RELATIVE_VALUE_RUNTIME.last_scan is not None:
+            return RELATIVE_VALUE_RUNTIME.last_scan
+        return scan_relative_value()
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
 
