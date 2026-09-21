@@ -211,6 +211,16 @@ def _position_size(client: Any, symbol: str) -> float:
 
 
 def private_plan() -> dict[str, Any]:
+    # Keep the read-only planning policy aligned with the canary constants.
+    # This never arms live execution; it only synchronizes risk caps used by
+    # order_preflight so plan and execution evaluate the same limits.
+    save_policy({
+        "live_execution": False,
+        "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
+        "max_order_notional_usd": MAX_NOTIONAL_USD,
+        "max_open_positions": MAX_OPEN_POSITIONS,
+        "allowed_roots": ["XBTUSD", "ETHUSD", "SOLUSD"],
+    })
     scan = public_scan()
     r = readiness()
 
