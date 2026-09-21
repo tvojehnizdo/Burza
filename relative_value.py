@@ -154,6 +154,7 @@ def init_db(path: Path = DB_PATH) -> None:
                 entry_fixed_px REAL NOT NULL,
                 entry_edge_bps REAL NOT NULL,
                 entry_funding_bps_h REAL,
+                neutral_units REAL,
                 exit_perp_px REAL,
                 exit_fixed_px REAL,
                 gross_pnl_czk REAL,
@@ -165,6 +166,9 @@ def init_db(path: Path = DB_PATH) -> None:
                 status TEXT NOT NULL
             )"""
         )
+        cols = {str(r[1]) for r in con.execute("PRAGMA table_info(rv_paper_pairs)").fetchall()}
+        if "neutral_units" not in cols:
+            con.execute("ALTER TABLE rv_paper_pairs ADD COLUMN neutral_units REAL")
         con.execute(
             "CREATE INDEX IF NOT EXISTS idx_rv_paper_status ON rv_paper_pairs(status,opened_ms)"
         )
@@ -439,9 +443,10 @@ def _pair_map(scan: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
 def _paper_mark(trade: tuple[Any, ...], quote: dict[str, Any], now: int) -> dict[str, float | int]:
     (
         trade_id, opened_ms, direction, notional, entry_perp, entry_fixed,
-        entry_funding_bps_h,
+        entry_funding_bps_h, neutral_units,
     ) = trade
     n = float(notional)
+    u = float(neutral_units or (n / max(float(entry_perp), float(entry_fixed))))
     hours = max(0.0, (now - int(opened_ms)) / 3_600_000.0)
     fee_rate = MAKER_FEE_BPS / 10000.0
 
@@ -453,22 +458,25 @@ def _paper_mark(trade: tuple[Any, ...], quote: dict[str, Any], now: int) -> dict
     if direction == "LONG_PERP_SHORT_FIXED":
         exit_perp = pb
         exit_fixed = fa
-        perp_ret = exit_perp / float(entry_perp) - 1.0
-        fixed_ret = 1.0 - exit_fixed / float(entry_fixed)
+        gross = u * ((exit_perp - float(entry_perp)) + (float(entry_fixed) - exit_fixed))
         funding_sign = -1.0
     else:
         exit_perp = pa
         exit_fixed = fb
-        perp_ret = 1.0 - exit_perp / float(entry_perp)
-        fixed_ret = exit_fixed / float(entry_fixed) - 1.0
+        gross = u * ((float(entry_perp) - exit_perp) + (exit_fixed - float(entry_fixed)))
         funding_sign = 1.0
 
-    gross = n * (perp_ret + fixed_ret)
-    fees = 4.0 * n * fee_rate
+    # Equal normalized base exposure on both legs: fee/funding scale off actual
+    # leg notionals instead of assuming identical percentage returns.
+    fees = fee_rate * u * (
+        float(entry_perp) + float(entry_fixed) + float(exit_perp) + float(exit_fixed)
+    )
     funding_bps_h = float(entry_funding_bps_h or 0.0)
-    funding_proxy = n * funding_sign * funding_bps_h * hours / 10000.0
+    perp_entry_notional = u * float(entry_perp)
+    funding_proxy = perp_entry_notional * funding_sign * funding_bps_h * hours / 10000.0
     pnl = gross - fees + funding_proxy
-    net_bps = pnl / n * 10000.0 if n > 0 else 0.0
+    reference_notional = u * ((float(entry_perp) + float(entry_fixed)) / 2.0)
+    net_bps = pnl / reference_notional * 10000.0 if reference_notional > 0 else 0.0
 
     return {
         "id": int(trade_id),
@@ -494,16 +502,16 @@ def resolve_paper_pairs(scan: dict[str, Any], path: Path = DB_PATH) -> list[dict
     with sqlite3.connect(path) as con:
         rows = con.execute(
             """SELECT id,opened_ms,direction,notional_per_leg_czk,
-                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,
+                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,neutral_units,
                       perp_symbol,fixed_symbol
                FROM rv_paper_pairs WHERE status='OPEN'"""
         ).fetchall()
 
         for r in rows:
-            quote = qmap.get((str(r[7]), str(r[8])))
+            quote = qmap.get((str(r[8]), str(r[9])))
             if not quote:
                 continue
-            mark = _paper_mark(r[:7], quote, now)
+            mark = _paper_mark(r[:8], quote, now)
             reason = None
             current_z = quote.get("zscore")
             net_pnl_bps = float(mark["net_pnl_bps"])
@@ -606,18 +614,20 @@ def maybe_open_paper_pairs(scan: dict[str, Any], path: Path = DB_PATH) -> list[d
             entry_fixed = float(x["fixed_ask"])
 
         funding_bps_h = x.get("funding_bps_per_hour")
+        neutral_units = notional / max(entry_perp, entry_fixed)
         with sqlite3.connect(path) as con:
             cur = con.execute(
                 """INSERT INTO rv_paper_pairs(
                     opened_ms,root,perp_symbol,fixed_symbol,direction,
                     notional_per_leg_czk,entry_perp_px,entry_fixed_px,
-                    entry_edge_bps,entry_funding_bps_h,status
-                ) VALUES(?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
+                    entry_edge_bps,entry_funding_bps_h,neutral_units,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
                 (
                     now, x["root"], x["perp_symbol"], x["fixed_symbol"], direction,
                     notional, entry_perp, entry_fixed,
                     float(x["net_basis_proxy_bps"]),
                     float(funding_bps_h) if funding_bps_h is not None else None,
+                    neutral_units,
                 ),
             )
             trade_id = int(cur.lastrowid)
@@ -644,7 +654,7 @@ def paper_status(scan: dict[str, Any] | None = None, path: Path = DB_PATH) -> di
     with sqlite3.connect(path) as con:
         rows = con.execute(
             """SELECT id,opened_ms,direction,notional_per_leg_czk,
-                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,
+                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,neutral_units,
                       perp_symbol,fixed_symbol,root,entry_edge_bps
                FROM rv_paper_pairs WHERE status='OPEN'
                ORDER BY opened_ms"""
@@ -666,17 +676,18 @@ def paper_status(scan: dict[str, Any] | None = None, path: Path = DB_PATH) -> di
     open_marks: list[dict[str, Any]] = []
     unrealized = 0.0
     for r in rows:
-        quote = qmap.get((str(r[7]), str(r[8])))
-        mark = _paper_mark(r[:7], quote, now) if quote else None
+        quote = qmap.get((str(r[8]), str(r[9])))
+        mark = _paper_mark(r[:8], quote, now) if quote else None
         if mark:
             unrealized += float(mark["pnl_czk"])
         open_marks.append({
             "id": int(r[0]),
-            "root": r[9],
-            "perp_symbol": r[7],
-            "fixed_symbol": r[8],
+            "root": r[10],
+            "perp_symbol": r[8],
+            "fixed_symbol": r[9],
             "direction": r[2],
-            "entry_edge_bps": round(float(r[10]), 4),
+            "entry_edge_bps": round(float(r[11]), 4),
+            "neutral_units": round(float(r[7] or 0.0), 8),
             "mark_net_pnl_bps": round(float(mark["net_pnl_bps"]), 4) if mark else None,
             "mark_pnl_czk": round(float(mark["pnl_czk"]), 4) if mark else None,
         })
