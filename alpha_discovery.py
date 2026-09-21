@@ -25,6 +25,20 @@ ALPHA_MAX_SPREAD_BPS = float(os.getenv("ALPHA_MAX_SPREAD_BPS", "8"))
 PAPER_ALLOC_PCT = float(os.getenv("PAPER_ALLOC_PCT", "25")) / 100.0
 MAX_ROWS = int(os.getenv("ALPHA_MAX_ROWS", "150000"))
 
+# Shadow paper is deliberately isolated from the validated PAPER ledger and LIVE gate.
+# It records weaker, explicitly unvalidated state candidates to build evidence faster.
+SHADOW_ENABLED = os.getenv("SHADOW_PAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+SHADOW_MIN_TRAIN = int(os.getenv("SHADOW_MIN_TRAIN", "12"))
+SHADOW_MIN_VALID = int(os.getenv("SHADOW_MIN_VALID", "6"))
+SHADOW_MIN_GROSS_BPS = float(os.getenv("SHADOW_MIN_GROSS_BPS", "0.5"))
+SHADOW_MIN_HIT = float(os.getenv("SHADOW_MIN_HIT", "0.50"))
+SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", "4"))
+SHADOW_ALLOC_PCT = float(os.getenv("SHADOW_ALLOC_PCT", "10")) / 100.0
+SHADOW_MAX_DD_PCT = float(os.getenv("SHADOW_MAX_DRAWDOWN_PCT", "30"))
+SHADOW_HORIZONS = tuple(
+    int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "30,60").split(",") if x.strip()
+)
+
 
 def ternary(value: float, threshold: float) -> int:
     if value > threshold:
@@ -198,6 +212,74 @@ def discover_dataframe(
     }
 
 
+def discover_shadow_models(raw: pd.DataFrame) -> list[dict[str, Any]]:
+    """Find weaker state candidates for isolated SHADOW PAPER only.
+
+    These candidates are intentionally NOT eligible for the validated PAPER ledger
+    or LIVE bridge. Selection uses gross directional persistence with smaller
+    sample requirements so the system can collect empirical trade outcomes faster.
+    """
+    if raw.empty:
+        return []
+    base = enrich_states(raw)
+    all_models: list[dict[str, Any]] = []
+    for horizon_s in SHADOW_HORIZONS:
+        x = add_forward_label(base, horizon_s)
+        x = x[x["spread_bps"].astype(float) <= ALPHA_MAX_SPREAD_BPS].copy()
+        if len(x) < SHADOW_MIN_TRAIN + SHADOW_MIN_VALID:
+            continue
+        cutoff = int(x["ts_ms"].quantile(0.70))
+        train = x[x.ts_ms <= cutoff]
+        valid = x[x.ts_ms > cutoff]
+        for (symbol, state), tg in train.groupby(["symbol", "state_key"]):
+            if len(tg) < SHADOW_MIN_TRAIN:
+                continue
+            train_vals = tg["fwd_bps"].to_numpy(dtype=float)
+            train_mean = float(np.mean(train_vals))
+            if train_mean == 0:
+                continue
+            side = "LONG" if train_mean > 0 else "SHORT"
+            sign = 1.0 if side == "LONG" else -1.0
+            vg = valid[(valid.symbol == symbol) & (valid.state_key == state)]
+            if len(vg) < SHADOW_MIN_VALID:
+                continue
+            valid_vals = vg["fwd_bps"].to_numpy(dtype=float)
+            train_signed = sign * train_vals
+            valid_signed = sign * valid_vals
+            train_gross = float(np.mean(train_signed))
+            valid_gross = float(np.mean(valid_signed))
+            if train_gross < SHADOW_MIN_GROSS_BPS or valid_gross < SHADOW_MIN_GROSS_BPS:
+                continue
+            train_hit = float(np.mean(train_signed > 0))
+            valid_hit = float(np.mean(valid_signed > 0))
+            if train_hit < SHADOW_MIN_HIT or valid_hit < SHADOW_MIN_HIT:
+                continue
+            n_eff = min(len(train_signed), len(valid_signed))
+            noise = max(
+                float(np.std(train_signed, ddof=1)) if len(train_signed) > 1 else 1.0,
+                float(np.std(valid_signed, ddof=1)) if len(valid_signed) > 1 else 1.0,
+                1.0,
+            )
+            robust_gross = min(train_gross, valid_gross)
+            score = robust_gross * math.sqrt(n_eff) / noise
+            all_models.append({
+                "symbol": symbol,
+                "state_key": state,
+                "side": side,
+                "horizon_s": int(horizon_s),
+                "score": round(float(score), 5),
+                "gross_edge_bps": round(float(robust_gross), 4),
+                "net_edge_proxy_bps": round(float(robust_gross - ALPHA_COST_BPS), 4),
+                "train_n": int(len(train_signed)),
+                "valid_n": int(len(valid_signed)),
+                "train_hit": round(train_hit, 5),
+                "valid_hit": round(valid_hit, 5),
+                "validation_level": "UNVALIDATED_SHADOW",
+            })
+    all_models.sort(key=lambda z: (z["score"], z["gross_edge_bps"]), reverse=True)
+    return all_models[:200]
+
+
 def discover_models(db_path: Path = DB_PATH) -> dict[str, Any]:
     raw = load_snapshots(db_path)
     result = {
@@ -235,6 +317,7 @@ def discover_models(db_path: Path = DB_PATH) -> dict[str, Any]:
         })
     consensus.sort(key=lambda z: (z["score"], min(z["edge30_bps"], z["edge60_bps"])), reverse=True)
     result["consensus"] = consensus[:50]
+    result["shadow_candidates"] = discover_shadow_models(raw) if SHADOW_ENABLED else []
     return result
 
 
@@ -256,6 +339,122 @@ def paper_equity(db_path: Path = DB_PATH) -> float:
         return float(value)
     except Exception:
         return START_CAPITAL
+
+
+def shadow_equity(db_path: Path = DB_PATH) -> float:
+    value = get_meta("shadow_equity", START_CAPITAL, db_path)
+    try:
+        return float(value)
+    except Exception:
+        return START_CAPITAL
+
+
+def resolve_shadow_paper(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    t = now_ms()
+    closed: list[dict[str, Any]] = []
+    with connect_db(db_path) as con:
+        rows = con.execute(
+            """SELECT id,opened_ms,symbol,side,horizon_s,entry,notional_czk,cost_bps
+               FROM shadow_paper_trades
+               WHERE status='OPEN' AND opened_ms + horizon_s*1000 <= ?""",
+            (t,),
+        ).fetchall()
+        for row in rows:
+            trade_id, opened, symbol, side, horizon, entry, notional, cost_bps = row
+            px = con.execute(
+                """SELECT mid,ts_ms FROM micro_snapshots
+                   WHERE symbol=? AND ts_ms>=? ORDER BY ts_ms ASC LIMIT 1""",
+                (symbol, opened + horizon * 1000),
+            ).fetchone()
+            if not px:
+                continue
+            exit_px, closed_ms = float(px[0]), int(px[1])
+            sign = 1.0 if side == "LONG" else -1.0
+            gross_bps = sign * (exit_px / float(entry) - 1.0) * 10000.0
+            net_bps = gross_bps - float(cost_bps)
+            pnl = float(notional) * net_bps / 10000.0
+            con.execute(
+                """UPDATE shadow_paper_trades
+                   SET closed_ms=?,exit=?,pnl_czk=?,net_bps=?,status='CLOSED'
+                   WHERE id=?""",
+                (closed_ms, exit_px, pnl, net_bps, trade_id),
+            )
+            closed.append({
+                "id": trade_id, "symbol": symbol, "side": side,
+                "net_bps": round(net_bps, 3), "pnl_czk": round(pnl, 3),
+            })
+    if closed:
+        eq = shadow_equity(db_path) + sum(x["pnl_czk"] for x in closed)
+        set_meta("shadow_equity", eq, db_path)
+    return closed
+
+
+def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    if not SHADOW_ENABLED:
+        return []
+    candidates_raw = models.get("shadow_candidates", [])
+    if not candidates_raw:
+        return []
+
+    eq = shadow_equity(db_path)
+    if eq <= START_CAPITAL * (1.0 - SHADOW_MAX_DD_PCT / 100.0):
+        set_meta("shadow_paper_halted", {"reason": "MAX_DRAWDOWN", "equity": eq}, db_path)
+        return []
+
+    with connect_db(db_path) as con:
+        open_rows = con.execute(
+            "SELECT symbol FROM shadow_paper_trades WHERE status='OPEN'"
+        ).fetchall()
+    open_symbols = {r[0] for r in open_rows}
+    slots = max(0, SHADOW_MAX_OPEN - len(open_symbols))
+    if slots <= 0:
+        return []
+
+    by_state: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for model in candidates_raw:
+        by_state.setdefault((model["symbol"], model["state_key"]), []).append(model)
+
+    latest = latest_rows(db_path)
+    t = now_ms()
+    matches: list[tuple[float, dict[str, Any], Any]] = []
+    for _, row in latest.iterrows():
+        if row.symbol in open_symbols or t - int(row.ts_ms) > 5_000:
+            continue
+        if float(row.spread_bps) > ALPHA_MAX_SPREAD_BPS:
+            continue
+        options = by_state.get((row.symbol, row.state_key), [])
+        if not options:
+            continue
+        model = max(options, key=lambda z: (z["score"], z["gross_edge_bps"]))
+        matches.append((model["score"], model, row))
+    matches.sort(key=lambda z: z[0], reverse=True)
+
+    opened: list[dict[str, Any]] = []
+    notional = max(0.0, min(eq * SHADOW_ALLOC_PCT, eq))
+    for _, model, row in matches[:slots]:
+        with connect_db(db_path) as con:
+            cur = con.execute(
+                """INSERT INTO shadow_paper_trades(
+                    opened_ms,symbol,side,horizon_s,entry,notional_czk,
+                    signal_edge_bps,signal_score,cost_bps,state_key,signal_kind,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
+                (
+                    t, row.symbol, model["side"], model["horizon_s"], float(row.mid), notional,
+                    model["gross_edge_bps"], model["score"], ALPHA_COST_BPS,
+                    row.state_key, "UNVALIDATED_STATE",
+                ),
+            )
+            trade_id = cur.lastrowid
+        opened.append({
+            "id": trade_id, "symbol": row.symbol, "side": model["side"],
+            "horizon_s": model["horizon_s"], "entry": float(row.mid),
+            "notional_czk": round(notional, 2),
+            "gross_edge_bps": model["gross_edge_bps"],
+            "net_edge_proxy_bps": model["net_edge_proxy_bps"],
+            "score": model["score"], "state_key": row.state_key,
+            "validation_level": "UNVALIDATED_SHADOW",
+        })
+    return opened
 
 
 def resolve_paper(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
@@ -378,16 +577,21 @@ class AlphaRuntime:
         while not self._stop.is_set():
             try:
                 closed = resolve_paper(self.db_path)
+                shadow_closed = resolve_shadow_paper(self.db_path)
                 models = discover_models(self.db_path)
                 opened = maybe_open_paper(models, self.db_path)
+                shadow_opened = maybe_open_shadow_paper(models, self.db_path)
                 self.last_models = models
                 self.last_cycle_ms = now_ms()
                 set_meta("alpha_last", {
                     "generated_ms": self.last_cycle_ms,
                     "rows": models["rows"],
                     "consensus_count": len(models["consensus"]),
+                    "shadow_candidate_count": len(models.get("shadow_candidates", [])),
                     "opened": opened,
                     "closed": closed,
+                    "shadow_opened": shadow_opened,
+                    "shadow_closed": shadow_closed,
                 }, self.db_path)
                 self.last_error = None
             except Exception as exc:
@@ -400,6 +604,8 @@ class AlphaRuntime:
         with connect_db(self.db_path) as con:
             open_n = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='OPEN'").fetchone()[0]
             closed_n = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='CLOSED'").fetchone()[0]
+            shadow_open_n = con.execute("SELECT COUNT(*) FROM shadow_paper_trades WHERE status='OPEN'").fetchone()[0]
+            shadow_closed_n = con.execute("SELECT COUNT(*) FROM shadow_paper_trades WHERE status='CLOSED'").fetchone()[0]
             rows = con.execute("SELECT COUNT(*) FROM micro_snapshots").fetchone()[0]
             recent = [
                 {
@@ -409,6 +615,17 @@ class AlphaRuntime:
                 for r in con.execute(
                     """SELECT id,symbol,side,status,pnl_czk,net_bps
                        FROM paper_trades ORDER BY id DESC LIMIT 10"""
+                ).fetchall()
+            ]
+            recent_shadow = [
+                {
+                    "id": r[0], "symbol": r[1], "side": r[2], "horizon_s": r[3],
+                    "status": r[4], "pnl_czk": r[5], "net_bps": r[6],
+                    "signal_kind": r[7],
+                }
+                for r in con.execute(
+                    """SELECT id,symbol,side,horizon_s,status,pnl_czk,net_bps,signal_kind
+                       FROM shadow_paper_trades ORDER BY id DESC LIMIT 10"""
                 ).fetchall()
             ]
         return {
@@ -421,6 +638,15 @@ class AlphaRuntime:
             "closed_trades": closed_n,
             "consensus_count": len(self.last_models.get("consensus", [])) if self.last_models else 0,
             "recent_paper": recent,
+            "shadow": {
+                "enabled": SHADOW_ENABLED,
+                "equity": round(shadow_equity(self.db_path), 2),
+                "open_trades": shadow_open_n,
+                "closed_trades": shadow_closed_n,
+                "candidate_count": len(self.last_models.get("shadow_candidates", [])) if self.last_models else 0,
+                "recent": recent_shadow,
+                "counts_for_live_gate": False,
+            },
             "live_orders": False,
         }
 
