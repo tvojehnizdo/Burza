@@ -259,6 +259,26 @@ def _ticker_mid(client: Any, symbol: str) -> float:
     raise RuntimeError(f"No usable ticker for {symbol}")
 
 
+def _symbols_in_open_orders(payload: Any) -> set[str]:
+    out: set[str] = set()
+
+    def walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            for key in ("symbol", "tradeable"):
+                value = obj.get(key)
+                if value:
+                    out.add(str(value).upper())
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+
+    walk(payload)
+    return out
+
+
 def _position_size(client: Any, symbol: str) -> float:
     return float(position_map(client.open_positions()).get(symbol.upper(), 0.0))
 
@@ -311,7 +331,10 @@ def private_plan() -> dict[str, Any]:
     candidates = [x for x in scan.get("all", []) if x.get("canary_signal_ready")]
     client = client_from_env()
     open_symbols = set(position_map(client.open_positions()).keys())
-    candidates = [x for x in candidates if str(x.get("symbol") or "").upper() not in open_symbols]
+    order_symbols = _symbols_in_open_orders(r.get("open_orders") or {})
+    stale_order_symbols = order_symbols - open_symbols
+    blocked_symbols = open_symbols | stale_order_symbols
+    candidates = [x for x in candidates if str(x.get("symbol") or "").upper() not in blocked_symbols]
     executable: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
 
@@ -406,6 +429,8 @@ def private_plan() -> dict[str, Any]:
         "candidate": executable[0] if executable else None,
         "alternatives": executable[1:],
         "rejected_candidates": rejected,
+        "open_symbols": sorted(open_symbols),
+        "stale_order_symbols": sorted(stale_order_symbols),
         "public_scan": scan,
         "readiness": r,
         "policy_target": {
