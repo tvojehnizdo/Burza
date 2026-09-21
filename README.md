@@ -226,3 +226,6 @@ RV entry statistics now use time-decimated, spread-quality-filtered history and 
 
 ### Real Kraken status validation
 Status reporting now shows private Kraken account capital separately from PAPER equity, and private readiness generates a read-only inventory snapshot.
+
+### Sequential hunter validation
+The neutral profile now records a 12-pair spot microstructure universe and runs one SHADOW trade at a time using only cost-positive candidates, plus one sequential futures-maker economic proxy trade at a time. Both lanes remain PAPER/SHADOW only.
