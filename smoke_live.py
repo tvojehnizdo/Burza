@@ -8,20 +8,21 @@ PARAMS = {
 }
 
 report = {"selftest": engine.selftest_report(), "spot": {}, "futures": {}}
-universe = engine.kraken_universe(12)
-report["universe"] = universe
+report["universe"] = engine.kraken_universe(12)
 
 for symbol in ["XBTUSD", "ETHUSD", "SOLUSD"]:
-    df = engine.klines(symbol, limit=720)
-    report["spot"][symbol] = {
-        "bars": len(df),
-        "latest_pulse": engine.live_pulse(symbol),
-        "recent_replay_spot_costs": {k:v for k,v in engine.run_bt(df, symbol, PARAMS).items() if k != "ledger"},
-    }
-
-print(json.dumps(report, indent=2, default=str))
-if not report["selftest"]["ok"]:
-    raise SystemExit(2)
+    try:
+        df = engine.klines(symbol, limit=720)
+        report["spot"][symbol] = {
+            "bars": len(df),
+            "latest_pulse": engine.live_pulse(symbol),
+            "recent_replay_spot_costs": {
+                k: v for k, v in engine.run_bt(df, symbol, PARAMS, "spot").items()
+                if k != "ledger"
+            },
+        }
+    except Exception as exc:
+        report["spot"][symbol] = {"error": str(exc)}
 
 for symbol in engine.FUTURES_SYMBOLS:
     try:
@@ -29,7 +30,19 @@ for symbol in engine.FUTURES_SYMBOLS:
         report["futures"][symbol] = {
             "bars": len(df),
             "latest_pulse": engine.live_futures_pulse(symbol),
-            "recent_replay_futures_costs": {k:v for k,v in engine.run_bt(df, symbol, PARAMS, "futures").items() if k != "ledger"},
+            "recent_replay_futures_costs": {
+                k: v for k, v in engine.run_bt(df, symbol, PARAMS, "futures").items()
+                if k != "ledger"
+            },
         }
     except Exception as exc:
         report["futures"][symbol] = {"error": str(exc)}
+
+print(json.dumps(report, indent=2, default=str))
+
+if not report["selftest"]["ok"]:
+    raise SystemExit("selftest failed")
+if not any("error" not in v for v in report["spot"].values()):
+    raise SystemExit("all spot smoke checks failed")
+if not any("error" not in v for v in report["futures"].values()):
+    raise SystemExit("all futures smoke checks failed")
