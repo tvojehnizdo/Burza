@@ -203,17 +203,37 @@ function Show-Permission-Checklist($Report) {
 
 function Ensure-V4 {
     $ok = $false
+    $stale = $false
     try {
         $health = Invoke-RestMethod "http://127.0.0.1:8765/api/health" -TimeoutSec 2
-        if ($health.ok) { $ok = $true }
+        $status = Invoke-RestMethod "http://127.0.0.1:8765/api/v4/status" -TimeoutSec 2
+        $buildOk = ([string]$health.build -eq "4.4-usdc-sequential-hunter")
+        $cycleOk = ([int]$status.decision_interval_s -le 2)
+        if ($health.ok -and $buildOk -and $cycleOk) {
+            $ok = $true
+        }
+        elseif ($health.ok) {
+            $stale = $true
+        }
     } catch { }
 
     if ($ok) {
-        Write-Host "V4 server už běží." -ForegroundColor Green
+        Write-Host "V4.4 sekvenční hunter už běží." -ForegroundColor Green
         return
     }
 
-    Write-Host "V4 neběží -> spouštím neutrální sekvenční hunter profil v novém PowerShell okně..." -ForegroundColor Yellow
+    if ($stale) {
+        Write-Host "Na 8765 běží starý/nesprávný V4 profil -> ukončuji ho." -ForegroundColor Yellow
+        try {
+            $listener = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($listener -and $listener.OwningProcess) {
+                Stop-Process -Id $listener.OwningProcess -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 1
+            }
+        } catch { }
+    }
+
+    Write-Host "Spouštím neutrální sekvenční hunter profil v novém PowerShell okně..." -ForegroundColor Yellow
     $launcher = Join-Path $PSScriptRoot "start_v4_neutral.ps1"
     Start-Process pwsh.exe -ArgumentList "-NoExit","-ExecutionPolicy","Bypass","-File",$launcher
 
