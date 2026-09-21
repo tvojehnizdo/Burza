@@ -12,6 +12,7 @@ import requests
 
 from futures_private import (
     client_from_env,
+    contract_size,
     instrument_specs,
     load_policy,
     min_lot,
@@ -160,7 +161,7 @@ def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
             continue
         symbol = str(row.get("symbol") or "").upper()
         spec = specs.get(symbol) or {}
-        if not symbol.startswith("PF_") or not bool(spec.get("tradeable")):
+        if not symbol.startswith("PF_") or not symbol.endswith("USD") or not bool(spec.get("tradeable")):
             continue
         try:
             bid = float(row.get("bid") or 0.0)
@@ -171,7 +172,7 @@ def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
             continue
         mid = (bid + ask) / 2.0
         try:
-            min_notional = float(spec.get("qty_step") or 0.0) * mid
+            min_notional = float(spec.get("qty_step") or 0.0) * mid * float(spec.get("contract_size") or 1.0)
         except Exception:
             min_notional = 999999.0
         if min_notional <= 0 or min_notional > MAX_NOTIONAL_USD:
@@ -309,7 +310,8 @@ def private_plan() -> dict[str, Any]:
     for p in candidates:
         symbol = str(p["symbol"]).upper()
         px = _ticker_mid(client, symbol)
-        raw_size = notional_cap / px
+        csize = contract_size(symbol)
+        raw_size = notional_cap / (px * csize)
         size = round_size_down(symbol, raw_size)
         minimum = min_lot(symbol)
         if size < minimum:
@@ -322,7 +324,7 @@ def private_plan() -> dict[str, Any]:
                 "raw_size": raw_size,
                 "rounded_size": size,
                 "min_lot": minimum,
-                "minimum_lot_notional_usd": minimum * px,
+                "minimum_lot_notional_usd": minimum * px * csize,
                 "signal_net_edge_bps": p.get("taker_net_edge_bps"),
             })
             continue
@@ -338,7 +340,7 @@ def private_plan() -> dict[str, Any]:
                 "equity_usd": equity,
                 "notional_cap_usd": notional_cap,
                 "size": size,
-                "estimated_notional_usd": size * px,
+                "estimated_notional_usd": size * px * csize,
                 "min_lot": minimum,
                 "signal_net_edge_bps": p.get("taker_net_edge_bps"),
             })
@@ -360,7 +362,7 @@ def private_plan() -> dict[str, Any]:
             "side": side,
             "size": size,
             "mid_price": px,
-            "estimated_notional_usd": size * px,
+            "estimated_notional_usd": size * px * csize,
             "equity_usd": equity,
             "notional_cap_usd": notional_cap,
             "stop_price": stop_price,
