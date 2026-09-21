@@ -43,6 +43,8 @@ $env:RV_STOP_Z = "3.5"
 $env:RV_MIN_DAYS_TO_EXPIRY = "0.5"
 $env:RV_MAX_DAYS_TO_EXPIRY = "220"
 $env:RV_HISTORY_WINDOW = "500"
+$env:RV_HISTORY_SAMPLE_S = "30"
+$env:RV_MAX_PAIR_SPREAD_BPS = "15"
 $env:RV_DB = "data/relative_value_v2.db"
 
 # Automatically exploit qualifying opportunities in isolated PAPER.
@@ -60,7 +62,8 @@ Write-Host "Primary strategy: PF/FF market-neutral relative value" -ForegroundCo
 Write-Host "Eligible opportunities: AUTO-EXECUTE in PAPER (two-leg)" -ForegroundColor Green
 Write-Host "Scanner cadence: 5 s (FAST PAPER)" -ForegroundColor Green
 Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" -ForegroundColor Green
-Write-Host "Entry: basis deviation >= 1.5 sigma after >=60 observations; min net edge 5 bps" -ForegroundColor Green
+Write-Host "Entry: robust basis deviation >= 1.5 sigma after >=60 quality observations; min net edge 5 bps" -ForegroundColor Green
+Write-Host "History: 30 s decimation; pair spread quality cap 15 bps" -ForegroundColor Green
 Write-Host "Directional unvalidated shadow: OFF" -ForegroundColor Yellow
 Write-Host "LIVE orders: DISABLED" -ForegroundColor Yellow
 Write-Host "Dashboard: http://127.0.0.1:8765" -ForegroundColor Green
