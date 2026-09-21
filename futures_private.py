@@ -117,7 +117,7 @@ class KrakenFutures:
             payload["triggerSignal"] = trigger_signal
         if cli_ord_id:
             payload["cliOrdId"] = cli_ord_id
-        return self.request("POST", "/api/v3/sendOrder", payload)
+        return self.request("POST", "/api/v3/sendorder", payload)
 
     def deadman(self, timeout_s: int) -> dict[str, Any]:
         return self.request("POST", "/api/v3/cancelallordersafter", {"timeout": int(timeout_s)})
