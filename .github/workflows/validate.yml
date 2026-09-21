@@ -1,0 +1,23 @@
+name: validate-pulse-hunter
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements.txt
+      - run: python -m py_compile app.py engine.py smoke_live.py
+      - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
+      - run: python smoke_live.py | tee smoke-report.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke-report.json
