@@ -213,3 +213,7 @@ The neutral V2 runner can use a faster PAPER-only profile: 5 s scanning, 1.5-sig
 
 ### GBP/JPY Breakout Lab
 A separate PAPER research lane for GBP/JPY. It keeps TECHNICAL and NEWS hypotheses separate, stores observed broker bid/ask quotes in data/gbpjpy_breakout.db, tracks actual spread observations, and requires explicit news timestamps. It intentionally does not invent slippage, win-rate, or broker-liquidity statistics. Until a real broker feed is connected it remains DATA_COLLECTION_ONLY. LIVE orders are disabled.
+
+
+### RV LIVE CANARY
+Relative Value live execution is a separately armed Kraken Derivatives bridge. New entries require the PAPER evidence gate (minimum 20 closed pairs, positive net PnL, profit factor >= 1.20, max drawdown <= 5%), Futures API trading permission with Transfer=NO_ACCESS, and a clean managed account state. The first stage is capped to one live pair and a small per-leg target notional. The two legs use equal base quantity. If the hedge leg fails, the bridge attempts immediate reduce-only compensation. DISARM blocks new entries first and preserves exit capability until managed exposure is closed.
