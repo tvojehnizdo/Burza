@@ -12,6 +12,9 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from alpha_discovery import AlphaRuntime, discover_models
+from microstructure import KrakenMicroRecorder
+
 KRAKEN = "https://api.kraken.com"
 KRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
 START_CAPITAL = float(os.getenv("START_CAPITAL", "5000"))
@@ -27,7 +30,10 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="3.0")
+app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="4.0")
+RECORDER = KrakenMicroRecorder()
+ALPHA_RUNTIME = AlphaRuntime()
+AUTO_RECORD = os.getenv("AUTO_RECORD", "1").lower() in {"1","true","yes","on"}
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "ImpulseMax5K/2.0"})
 
@@ -560,21 +566,106 @@ def selftest_report() -> dict[str, Any]:
     }
 
 
+@app.on_event("startup")
+def v4_startup():
+    if AUTO_RECORD:
+        RECORDER.start()
+        ALPHA_RUNTIME.start()
+
+
+@app.on_event("shutdown")
+def v4_shutdown():
+    ALPHA_RUNTIME.stop()
+    RECORDER.stop()
+
+
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return """<!doctype html><html><head><meta charset='utf-8'><title>IMPULSE MAX 5K</title>
-<style>body{font-family:system-ui;max-width:1000px;margin:35px auto;padding:0 16px;background:#0b1020;color:#e8eefc}button{padding:11px 16px;margin:4px}pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px}</style></head>
-<body><h1>IMPULSE MAX 5K - Kraken Pulse Hunter V3</h1><p>PAPER / REPLAY only. Spot, no leverage. LIVE disabled.</p>
-<button onclick="go('/api/pulses')">Scan Kraken</button><button onclick="go('/api/run','POST')">Replay</button><button onclick="go('/api/selftest')">Self-test</button><pre id='o'>Ready.</pre>
-<script>async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,{method:m});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=String(e)}}</script></body></html>"""
+    return """<!doctype html><html><head><meta charset='utf-8'><title>IMPULSE MAX 5K V4</title>
+<style>
+body{font-family:system-ui;max-width:1100px;margin:30px auto;padding:0 16px;background:#0b1020;color:#e8eefc}
+button{padding:11px 16px;margin:4px;border-radius:8px;border:0;cursor:pointer}
+pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px;min-height:220px}
+small{color:#9aa9c7}
+</style></head><body>
+<h1>IMPULSE MAX 5K — Kraken Pulse Hunter V4</h1>
+<p><b>PAPER / RESEARCH.</b> Live orders are disabled. V4 records Kraken L2 order book + taker trades, learns validated 30s/60s microstructure states and only then opens fixed-horizon PAPER signals.</p>
+<div>
+<button onclick="go('/api/v4/status')">V4 status</button>
+<button onclick="go('/api/v4/start','POST')">Start recorder + alpha</button>
+<button onclick="go('/api/v4/models')">Alpha models</button>
+<button onclick="go('/api/v4/paper')">Paper ledger</button>
+<button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
+<button onclick="go('/api/v4/stop','POST')">Stop</button>
+</div>
+<small>Decision cadence 30 s; market data is recorded continuously at ~1 s snapshots. A trade is not forced when no validated edge exists.</small>
+<pre id='o'>Ready.</pre>
+<script>
+async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,{method:m});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=String(e)}}
+</script></body></html>"""
 
 
 @app.get("/api/health")
 def health():
     return {
-        "ok": True, "version": "3.0", "mode": "PAPER_REPLAY",
+        "ok": True, "version": "4.0", "mode": "PAPER_RESEARCH",
         "capital": START_CAPITAL, "live_orders": False
     }
+
+
+@app.post("/api/v4/start")
+def v4_start():
+    r1 = RECORDER.start()
+    r2 = ALPHA_RUNTIME.start()
+    return {
+        "ok": True,
+        "recorder_started": r1,
+        "alpha_started": r2,
+        "status": {"recorder": RECORDER.status(), "alpha": ALPHA_RUNTIME.status()},
+        "live_orders": False,
+    }
+
+
+@app.post("/api/v4/stop")
+def v4_stop():
+    ALPHA_RUNTIME.stop()
+    RECORDER.stop()
+    return {"ok": True, "message": "V4 recorder/alpha stop requested", "live_orders": False}
+
+
+@app.get("/api/v4/status")
+def v4_status():
+    return {
+        "version": "4.0",
+        "recorder": RECORDER.status(),
+        "alpha": ALPHA_RUNTIME.status(),
+        "decision_interval_s": int(os.getenv("ALPHA_INTERVAL_S", "30")),
+        "live_orders": False,
+    }
+
+
+@app.get("/api/v4/models")
+def v4_models():
+    try:
+        return discover_models()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
+
+
+@app.get("/api/v4/paper")
+def v4_paper():
+    from microstructure import connect_db
+    with connect_db() as con:
+        rows = con.execute(
+            """SELECT id,opened_ms,closed_ms,symbol,side,horizon_s,entry,exit,
+                      notional_czk,model_edge_bps,model_score,cost_bps,pnl_czk,
+                      net_bps,state_key,status
+               FROM paper_trades ORDER BY id DESC LIMIT 100"""
+        ).fetchall()
+    cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
+            "notional_czk","model_edge_bps","model_score","cost_bps","pnl_czk",
+            "net_bps","state_key","status"]
+    return {"trades": [dict(zip(cols, r)) for r in rows], "live_orders": False}
 
 
 @app.get("/api/selftest")
