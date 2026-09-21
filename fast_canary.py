@@ -208,13 +208,43 @@ def scan(
             "score": round(score, 3),
         })
 
-    out.sort(key=lambda x: (bool(x["ready"]), float(x["score"])), reverse=True)
+    # Rank executable/funded opportunities before raw score. A strong signal
+    # in an unfunded quote currency or below Kraken minimum is not actionable.
+    out.sort(
+        key=lambda x: (
+            bool(x["ready"]),
+            bool(x["size_ok"]),
+            bool(x["balance_known"]),
+            1 if x.get("quote") == "USDC" and usdc > 0 else 0,
+            float(x["net_edge_proxy_bps"]),
+            float(x["score"]),
+        ),
+        reverse=True,
+    )
     ready = [x for x in out if x["ready"]]
+    funded_size_ok = [x for x in out if x["size_ok"]]
+    funded_any = [x for x in out if x["balance_known"]]
+
+    if ready:
+        candidate = ready[0]
+        reason = "FAST_CANARY_READY"
+    elif funded_size_ok:
+        candidate = funded_size_ok[0]
+        reason = "FUNDED_SIZE_OK_BUT_SIGNAL_NOT_READY"
+    elif funded_any:
+        candidate = funded_any[0]
+        reason = "FUNDED_BUT_BELOW_KRAKEN_MINIMUM"
+    else:
+        candidate = out[0] if out else None
+        reason = "NO_FUNDED_MARKET"
+
     return {
         "ready": bool(ready),
-        "reason": "FAST_CANARY_READY" if ready else "NO_POSITIVE_FAST_CANARY",
-        "candidate": ready[0] if ready else (out[0] if out else None),
+        "reason": reason,
+        "candidate": candidate,
         "ready_count": len(ready),
+        "funded_size_ok_count": len(funded_size_ok),
+        "funded_market_count": len(funded_any),
         "markets_discovered": len(markets),
         "scanned_count": len(out),
         "rejected": rejected,
@@ -222,5 +252,5 @@ def scan(
         "balances_seen": {"USD": usd, "USDC": usdc},
         "top": out[:12],
         "actual_order_submitted": False,
-        "note": "Fast canary uses live 1m OHLC/momentum/ATR and maker-cost economics; it is a screening proxy, not a guarantee of profit.",
+        "note": "Fast canary prioritizes actually funded/executable Kraken routes before raw signal score.",
     }
