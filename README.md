@@ -256,3 +256,6 @@ Validates the 22 USD allocated-capital ceiling and 50% (max 11 USD) live-manager
 
 ### Bounded live session validation
 Validates the one-command 60-minute / 10-entry futures session, 4-slot cap, 22 USD capital budget, 50% kill-switch, autonomous exits, and PowerShell launcher syntax.
+
+### Volatility/trailing/pair validation
+Validates TOP-20 volatility universe selection, tightening ratchet trailing exits, distant backup TP, pair-scanner logic, and current futures audit parser.
