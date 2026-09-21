@@ -81,8 +81,8 @@ def parse_env_tolerant(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]
     context: list[tuple[int, str]] = []
 
     patterns = [
-        re.compile(r"^\\s*\\$env:([A-Za-z_][A-Za-z0-9_.-]*)\\s*=\\s*(.+?)\\s*$", re.I),
-        re.compile(r"^\\s*(?:export\\s+|set\\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\\s*=\\s*(.+?)\\s*$", re.I),
+        re.compile(r"^\s*\$env:([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.+?)\s*$", re.I),
+        re.compile(r"^\s*(?:export\s+|set\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(.+?)\s*$", re.I),
         re.compile(r"^\\s*[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\\s*:\\s*(.+?)\\s*$", re.I),
     ]
 
@@ -259,6 +259,8 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
         "query_funds": "query-funds" in permissions,
         "query_open_trades": "query-open-trades" in permissions,
         "modify_trades": "modify-trades" in permissions,
+        "close_trades": "close-trades" in permissions,
+        "create_ws_token": "create-ws-token" in permissions,
         "withdraw_disabled": not withdraw,
         "withdraw_address_admin_disabled": not add_withdraw_addr,
     }
@@ -314,7 +316,7 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
 
     checks["validated_margin_order_path"] = bool(validate_order.get("ok"))
     checks["no_private_read_errors"] = not bool(errors)
-    checks["required_trading_permissions"] = checks["query_funds"] and checks["query_open_trades"] and checks["modify_trades"]
+    checks["required_trading_permissions"] = checks["query_funds"] and checks["query_open_trades"] and checks["modify_trades"] and checks["close_trades"]
 
     safe_to_arm = all([
         checks["auth_ok"],
