@@ -173,17 +173,31 @@ def position_map(payload: dict[str, Any]) -> dict[str, float]:
 
 
 def _flex_equity_usd(accounts_payload: dict[str, Any]) -> float:
-    accounts = accounts_payload.get("accounts") or {}
-    flex = accounts.get("flex") if isinstance(accounts, dict) else None
-    if isinstance(flex, dict):
-        for key in ("marginEquity", "portfolioValue", "collateralValue", "balanceValue"):
-            try:
-                value = float(flex.get(key) or 0.0)
-            except Exception:
-                value = 0.0
-            if value > 0:
-                return value
-    return 0.0
+    # Account layout can differ between Flex / multi-collateral configurations.
+    # Search known equity-like fields recursively instead of requiring one wallet layout.
+    wanted = ("marginEquity", "portfolioValue", "collateralValue", "balanceValue")
+    best = 0.0
+
+    def walk(obj: Any) -> None:
+        nonlocal best
+        if isinstance(obj, dict):
+            for key in wanted:
+                try:
+                    value = float(obj.get(key) or 0.0)
+                except Exception:
+                    value = 0.0
+                if value > best:
+                    best = value
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                if isinstance(value, (dict, list)):
+                    walk(value)
+
+    walk(accounts_payload.get("accounts") or accounts_payload)
+    return best
 
 
 def _ticker_map(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
