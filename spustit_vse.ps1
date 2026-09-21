@@ -20,6 +20,15 @@ function Banner([string]$Text, [ConsoleColor]$Color = [ConsoleColor]::Cyan) {
     Write-Host ("=" * 72) -ForegroundColor DarkGray
 }
 
+function Text([object]$Value) {
+    if ($null -eq $Value) { return "" }
+    return [string]$Value
+}
+
+function ChoiceUpper([object]$Value) {
+    return (Text $Value).Trim().ToUpperInvariant()
+}
+
 function Secure-ToPlain([Security.SecureString]$Secure) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     try {
@@ -65,23 +74,53 @@ function Load-ProtectedCredentialStore {
 }
 
 function Prompt-Credentials {
-    Banner "DOPLNĚNÍ KRAKEN API ÚDAJŮ" Yellow
-    Write-Host "Vkládáš je pouze do tohoto PowerShellu. Do chatu je neposílej."
-    Write-Host "Vstup je skrytý a hodnoty se nebudou vypisovat."
-    Write-Host ""
-    $key = Read-Host "Kraken API key / public key" -AsSecureString
-    $secret = Read-Host "Kraken private key / API secret" -AsSecureString
+    while ($true) {
+        Banner "DOPLNĚNÍ KRAKEN API ÚDAJŮ" Yellow
+        Write-Host "Potřebuji pouze API KEY + API SECRET. Žádný samostatný WebSocket token nevkládáš."
+        Write-Host "WebSocket token si systém vyžádá automaticky z Kraken API, pokud má key oprávnění WebSocket interface."
+        Write-Host ""
+        Write-Host "Vkládej údaje pouze sem do PowerShellu, nikdy do chatu." -ForegroundColor Yellow
+        Write-Host "Vstup je skrytý a hodnoty se nevypisují."
+        Write-Host ""
+        Write-Host "Pokud key ještě nemáš, otevřu Kraken API nastavení." -ForegroundColor Cyan
+        $open = Read-Host "Máš nyní Kraken API key + secret? [A/n]"
+        if ((ChoiceUpper $open) -eq "N") {
+            try { Start-Process "https://pro.kraken.com/app/settings/api" } catch { }
+            Write-Host ""
+            Write-Host "Vytvoř key a nastav:" -ForegroundColor Cyan
+            Write-Host "  ON  Query Funds"
+            Write-Host "  ON  Query Open Orders & Trades"
+            Write-Host "  ON  Create & Modify Orders"
+            Write-Host "  ON  Cancel & Close Orders"
+            Write-Host "  ON  WebSocket interface"
+            Write-Host "  OFF Withdraw Funds"
+            Write-Host "  OFF Add Withdrawal Addresses"
+            Write-Host "  OFF Update Withdrawal Addresses"
+            Write-Host ""
+            Read-Host "Až bude key vytvořený a secret zobrazený, stiskni ENTER"
+        }
 
-    if ((Secure-ToPlain $key).Length -lt 8 -or (Secure-ToPlain $secret).Length -lt 16) {
-        throw "Klíč nebo secret vypadají neúplně."
-    }
+        $key = Read-Host "Kraken API key / public key" -AsSecureString
+        $secret = Read-Host "Kraken API secret / private key" -AsSecureString
+        $keyPlain = Secure-ToPlain $key
+        $secretPlain = Secure-ToPlain $secret
 
-    $save = Read-Host "Uložit oba údaje lokálně šifrovaně přes Windows DPAPI pro další spuštění? [A/n]"
-    if ([string]::IsNullOrWhiteSpace($save) -or $save.Trim().ToUpper() -eq "A" -or $save.Trim().ToUpper() -eq "Y") {
-        Protect-CredentialStore $key $secret
-        Write-Host "Uloženo šifrovaně: $CredStore" -ForegroundColor Green
+        if ($keyPlain.Length -lt 8) {
+            Write-Host "API key je příliš krátký/neúplný. Zkus znovu." -ForegroundColor Red
+            continue
+        }
+        if ($secretPlain.Length -lt 16) {
+            Write-Host "API secret je příliš krátký/neúplný. Zkus znovu." -ForegroundColor Red
+            continue
+        }
+
+        $save = Read-Host "Uložit oba údaje lokálně šifrovaně přes Windows DPAPI pro další spuštění? [A/n]"
+        if ([string]::IsNullOrWhiteSpace((Text $save)) -or (ChoiceUpper $save) -in @("A","Y")) {
+            Protect-CredentialStore $key $secret
+            Write-Host "Uloženo šifrovaně: $CredStore" -ForegroundColor Green
+        }
+        return @($key, $secret)
     }
-    return @($key, $secret)
 }
 
 function Set-Process-Credentials([Security.SecureString]$Key, [Security.SecureString]$Secret) {
@@ -92,6 +131,7 @@ function Set-Process-Credentials([Security.SecureString]$Key, [Security.SecureSt
 function Clear-Process-Credentials {
     Remove-Item Env:KRAKEN_API_KEY -ErrorAction SilentlyContinue
     Remove-Item Env:KRAKEN_API_SECRET -ErrorAction SilentlyContinue
+    Remove-Item Env:KRAKEN_OTP -ErrorAction SilentlyContinue
 }
 
 function Invoke-Readiness([string]$EnvFile = "") {
@@ -107,13 +147,16 @@ function Invoke-Readiness([string]$EnvFile = "") {
     $exit = $LASTEXITCODE
     $report = $null
     if (Test-Path $ReadinessJson) {
-        $raw = Get-Content -Raw $ReadinessJson
-        if ($raw.Trim()) {
-            try { $report = $raw | ConvertFrom-Json } catch { }
+        $raw = Get-Content -Raw $ReadinessJson -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace((Text $raw))) {
+            try { $report = (Text $raw) | ConvertFrom-Json } catch { }
         }
     }
     $err = ""
-    if (Test-Path $ReadinessErr) { $err = Get-Content -Raw $ReadinessErr }
+    if (Test-Path $ReadinessErr) {
+        $tmpErr = Get-Content -Raw $ReadinessErr -ErrorAction SilentlyContinue
+        if ($null -ne $tmpErr) { $err = [string]$tmpErr }
+    }
 
     return [pscustomobject]@{
         ExitCode = $exit
@@ -131,7 +174,7 @@ function Show-Permission-Checklist($Report) {
     Write-Host "  [ON]  Query Open Orders & Trades"
     Write-Host "  [ON]  Create & Modify Orders / Modify Orders"
     Write-Host "  [ON]  Cancel & Close Orders"
-    Write-Host "  [ON]  WebSocket interface"
+    Write-Host "  [ON]  WebSocket interface  (systém z něj získá token automaticky)"
     Write-Host ""
     Write-Host "Musí být VYPNUTO:" -ForegroundColor Cyan
     Write-Host "  [OFF] Withdraw Funds"
@@ -251,13 +294,35 @@ while ($true) {
     }
 
     if (-not $result.Report) {
-        Banner "AUTENTIZACE NEPROŠLA" Red
-        if ($result.ErrorText) {
-            $safeError = $result.ErrorText
+        Banner "AUTENTIZACE / API TEST NEPROŠEL" Red
+        $safeError = Text $result.ErrorText
+        if (-not [string]::IsNullOrWhiteSpace($safeError)) {
             $safeError = $safeError -replace '(?i)(api[-_ ]?key|secret|private[-_ ]?key)\s*[=:]\s*\S+', '$1=<hidden>'
             Write-Host $safeError -ForegroundColor Red
         }
-        Write-Host "Zadej jiný Kraken API key + secret přímo zde." -ForegroundColor Yellow
+
+        if ($safeError -match '(?i)otp|2fa|two[- ]factor') {
+            Write-Host ""
+            Write-Host "Kraken key zřejmě vyžaduje API 2FA/OTP." -ForegroundColor Yellow
+            $otp = Read-Host "Zadej aktuální jednorázový API OTP kód"
+            if (-not [string]::IsNullOrWhiteSpace((Text $otp))) {
+                $env:KRAKEN_OTP = (Text $otp).Trim()
+                Write-Host "OTP doplněno pouze pro tento PowerShell. Opakuji test..." -ForegroundColor Cyan
+                continue
+            }
+        }
+
+        Write-Host ""
+        Write-Host "Nejčastější příčina: špatný/expirující key, secret, IP whitelist nebo API 2FA." -ForegroundColor Yellow
+        $next = Read-Host "ENTER = zadat key+secret znovu; S = otevřít Kraken API settings; Q = skončit"
+        if ((ChoiceUpper $next) -eq "Q") {
+            Clear-Process-Credentials
+            throw "Ukončeno uživatelem."
+        }
+        if ((ChoiceUpper $next) -eq "S") {
+            try { Start-Process "https://pro.kraken.com/app/settings/api" } catch { }
+            Read-Host "Po kontrole/vytvoření key stiskni ENTER"
+        }
         Clear-Process-Credentials
         $source = ""
         continue
@@ -278,11 +343,11 @@ while ($true) {
 
     Show-Permission-Checklist $r
     $choice = Read-Host "Po úpravě Kraken API key stiskni ENTER pro nový test; K = zadat nový key; Q = skončit"
-    if ($choice.Trim().ToUpper() -eq "Q") {
+    if ((ChoiceUpper $choice) -eq "Q") {
         Clear-Process-Credentials
         throw "Ukončeno uživatelem před safe_to_arm."
     }
-    if ($choice.Trim().ToUpper() -eq "K") {
+    if ((ChoiceUpper $choice) -eq "K") {
         Clear-Process-Credentials
         $source = ""
     }
@@ -296,6 +361,7 @@ Write-Host "V4 dashboard: http://127.0.0.1:8765"
 Write-Host "PAPER/alpha recorder pokračuje. Privátní API cesta je připravena."
 Write-Host ""
 Write-Host "DŮLEŽITÉ: současný V4 engine stále neposílá LIVE ordery; live_orders=false je záměrný poslední bezpečnostní zámek." -ForegroundColor Yellow
+Write-Host "Není potřeba vkládat žádný samostatný token: private WebSocket token získává systém automaticky z API key." -ForegroundColor Cyan
 Write-Host "Výběry nejsou povolené ani požadované."
 Write-Host ""
 try { Start-Process "http://127.0.0.1:8765" } catch { }
