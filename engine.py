@@ -647,6 +647,11 @@ def v4_status():
 @app.get("/api/v4/models")
 def v4_models():
     try:
+        # AlphaRuntime already recomputes models on its own cadence. Reuse the
+        # latest completed snapshot instead of doing the expensive discovery
+        # again on every Supervisor status poll.
+        if ALPHA_RUNTIME.last_models is not None:
+            return ALPHA_RUNTIME.last_models
         return discover_models()
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}", "live_orders": False}
