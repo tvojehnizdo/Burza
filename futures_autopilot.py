@@ -533,18 +533,16 @@ def run_forever() -> None:
     save_policy(_policy_patch(False))
     errors = 0
 
-    _log({"event": "AUTOPILOT_START", "pid": os.getpid()})
-    print("FUTURES AUTOPILOT LIVE: armed")
+    _log({"event": "LIVE_MANAGER_START", "pid": os.getpid()})
+    print("FUTURES LIVE MANAGER: armed")
     print(
-        f"slots={MAX_OPEN_POSITIONS} | per_trade_max=USD {MAX_NOTIONAL_USD:.2f} | "
-        f"portfolio_max=USD {MAX_PORTFOLIO_NOTIONAL_USD:.2f}/{MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY:.0f}% equity | "
+        f"manage_open_positions_only=true | "
         f"no_progress={NO_PROGRESS_SEC}s | hard_max={HARD_MAX_HOLD_SEC}s"
     )
 
     while True:
         try:
             actions = _manage_positions(client, state)
-            entry = _maybe_auto_entry(client, state)
             snap = _portfolio_snapshot(client)
             _save_state(state)
 
@@ -553,7 +551,7 @@ def run_forever() -> None:
                 f"equity=USD {snap['equity_usd']:.4f} | "
                 f"open={snap['open_position_count']}/{MAX_OPEN_POSITIONS} | "
                 f"notional=USD {snap['portfolio_notional_usd']:.4f} | "
-                f"entry={entry.get('reason')} | exits={len(actions)}"
+                f"new_live_entries=confirmation_required | exits={len(actions)}"
             )
             errors = 0
         except KeyboardInterrupt:
@@ -576,7 +574,9 @@ def status() -> dict[str, Any]:
     snap = _portfolio_snapshot(client)
     return {
         "ok": True,
-        "mode": "FUTURES_AUTOPILOT_LIVE",
+        "mode": "FUTURES_LIVE_MANAGER",
+        "new_live_entries": "confirmation_required",
+        "autonomous_position_management": True,
         "rules": {
             "loop_sec": LOOP_SEC,
             "quick_profit_gross_bps": QUICK_PROFIT_GROSS_BPS,
@@ -682,8 +682,8 @@ def main() -> None:
         return
 
     if args.run:
-        if args.confirm != "ARM-AUTOPILOT-LIVE":
-            raise SystemExit("Autopilot live requires --confirm ARM-AUTOPILOT-LIVE")
+        if args.confirm != "ARM-LIVE-MANAGER":
+            raise SystemExit("Live manager requires --confirm ARM-LIVE-MANAGER")
         _acquire_pid_lock()
         try:
             run_forever()
