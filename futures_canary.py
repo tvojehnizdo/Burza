@@ -28,7 +28,7 @@ from futures_private import (
 
 MAX_UNIVERSE = 20
 UNIVERSE_PREFILTER = 32
-MAX_UNIVERSE_SPREAD_BPS = 30.0
+MAX_UNIVERSE_SPREAD_BPS = 20.0
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
 # Tier-1 Futures taker fee 5 bps/side + conservative 2 bps slippage
@@ -39,7 +39,8 @@ EXEC_BUFFER_BPS_PER_SIDE = 3.0
 ROUND_TRIP_TAKER_COST_BPS = 2.0 * (
     TAKER_FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE + EXEC_BUFFER_BPS_PER_SIDE
 )
-MIN_TAKER_NET_EDGE_BPS = 5.0
+MIN_TAKER_NET_EDGE_BPS = 25.0
+MIN_VOLUME_RATIO = 0.60
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
@@ -135,7 +136,7 @@ def _signal(symbol: str) -> dict[str, Any]:
         confirmations += 1
     if (side == "LONG" and r60 > 0) or (side == "SHORT" and r60 < 0):
         confirmations += 1
-    if vol_ratio >= 0.45:
+    if vol_ratio >= MIN_VOLUME_RATIO:
         confirmations += 1
 
     confidence = min(0.95, 0.45 + 0.10 * confirmations + min(expected_bps / 500.0, 0.15))
@@ -143,6 +144,7 @@ def _signal(symbol: str) -> dict[str, Any]:
         side in {"LONG", "SHORT"}
         and confirmations >= 3
         and confidence >= 0.64
+        and vol_ratio >= MIN_VOLUME_RATIO
         and net_taker_bps >= MIN_TAKER_NET_EDGE_BPS
     )
 
@@ -163,6 +165,7 @@ def _signal(symbol: str) -> dict[str, Any]:
         "realized_vol_bps": round(realized_bps, 3),
         "volatility_score": round(volatility_score, 3),
         "volume_ratio": round(vol_ratio, 3),
+        "min_volume_ratio": MIN_VOLUME_RATIO,
         "expected_move_proxy_bps": round(expected_bps, 3),
         "taker_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "taker_net_edge_bps": round(net_taker_bps, 3),
@@ -434,6 +437,8 @@ def private_plan() -> dict[str, Any]:
             stop_price = round_price_to_tick(symbol, px * (1.0 + stop_frac), mode="up")
             take_price = round_price_to_tick(symbol, px * (1.0 - take_frac), mode="down")
 
+        _validate_protection_prices(symbol, side, px, stop_price, take_price)
+
         executable.append({
             "symbol": symbol,
             "side": side,
@@ -569,6 +574,8 @@ def plan_specific_candidate(
         stop_price = round_price_to_tick(symbol, px * (1.0 + stop_frac), mode="up")
         take_price = round_price_to_tick(symbol, px * (1.0 - take_frac), mode="down")
 
+    _validate_protection_prices(symbol, side, px, stop_price, take_price)
+
     candidate = {
         "symbol": symbol,
         "side": side,
@@ -593,6 +600,36 @@ def plan_specific_candidate(
         "readiness": r,
         "actual_order_submitted": False,
     }
+
+
+def _validate_protection_prices(
+    symbol: str,
+    side: str,
+    entry_price: float,
+    stop_price: float,
+    take_price: float,
+) -> None:
+    side = str(side).lower()
+    entry = float(entry_price)
+    stop = float(stop_price)
+    take = float(take_price)
+    if entry <= 0 or stop <= 0 or take <= 0:
+        raise RuntimeError(
+            f"Invalid protection price for {symbol}: entry={entry}, stop={stop}, take={take}"
+        )
+    if side == "buy":
+        if not (stop < entry < take):
+            raise RuntimeError(
+                f"Invalid LONG protection geometry for {symbol}: stop={stop}, entry={entry}, take={take}"
+            )
+    elif side == "sell":
+        if not (take < entry < stop):
+            raise RuntimeError(
+                f"Invalid SHORT protection geometry for {symbol}: take={take}, entry={entry}, stop={stop}"
+            )
+    else:
+        raise RuntimeError(f"Invalid side for protection validation: {side}")
+
 
 def _exit_limit_price(symbol: str, exit_side: str, trigger_price: float) -> float:
     # Kraken Futures stop/take-profit examples use both stopPrice and limitPrice.
@@ -715,6 +752,13 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     symbol = str(candidate["symbol"]).upper()
     side = str(candidate["side"]).lower()
     size = float(candidate["size"])
+    _validate_protection_prices(
+        symbol,
+        side,
+        float(candidate["mid_price"]),
+        float(candidate["stop_price"]),
+        float(candidate["take_profit_price"]),
+    )
     exit_side = "sell" if side == "buy" else "buy"
     client = client_from_env()
 
