@@ -4,6 +4,7 @@ import math
 import os
 import re
 import sqlite3
+import statistics
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,8 @@ MIN_NET_EDGE_BPS = float(os.getenv("RV_MIN_NET_EDGE_BPS", "8"))
 MIN_DAYS_TO_EXPIRY = float(os.getenv("RV_MIN_DAYS_TO_EXPIRY", "0.5"))
 MAX_DAYS_TO_EXPIRY = float(os.getenv("RV_MAX_DAYS_TO_EXPIRY", "220"))
 HISTORY_WINDOW = int(os.getenv("RV_HISTORY_WINDOW", "500"))
+HISTORY_SAMPLE_S = float(os.getenv("RV_HISTORY_SAMPLE_S", "30"))
+MAX_PAIR_SPREAD_BPS = float(os.getenv("RV_MAX_PAIR_SPREAD_BPS", "15"))
 MIN_HISTORY = int(os.getenv("RV_MIN_HISTORY", "60"))
 ENTRY_Z = float(os.getenv("RV_ENTRY_Z", "2.0"))
 EXIT_Z = float(os.getenv("RV_EXIT_Z", "0.5"))
@@ -201,25 +204,86 @@ def paper_equity(path: Path = DB_PATH) -> float:
 
 
 def _history_stats(perp: str, fixed: str, current_mid_basis: float, path: Path = DB_PATH) -> dict[str, Any]:
+    """Build a robust baseline from liquid, time-decimated observations only.
+
+    Raw scans run every few seconds and are highly autocorrelated. Fixed futures
+    can also publish very wide/stale top-of-book quotes. Both effects can make a
+    classical mean/std z-score look much more confident than it really is.
+    """
     init_db(path)
+    raw_limit = max(HISTORY_WINDOW * 20, HISTORY_WINDOW)
     with sqlite3.connect(path) as con:
         rows = con.execute(
-            """SELECT mid_basis_bps
+            """SELECT ts_ms,mid_basis_bps,perp_bid,perp_ask,fixed_bid,fixed_ask
                FROM rv_snapshots
                WHERE perp_symbol=? AND fixed_symbol=?
                ORDER BY id DESC LIMIT ?""",
-            (perp, fixed, HISTORY_WINDOW),
+            (perp, fixed, raw_limit),
         ).fetchall()
-    vals = [float(r[0]) for r in rows if r[0] is not None]
+
+    vals: list[float] = []
+    newest_selected_ts: int | None = None
+    min_gap_ms = max(int(HISTORY_SAMPLE_S * 1000), 0)
+
+    for r in rows:
+        ts, basis, pb, pa, fb, fa = r
+        if None in (ts, basis, pb, pa, fb, fa):
+            continue
+        try:
+            ts_i = int(ts)
+            basis_f = float(basis)
+            pb_f, pa_f = float(pb), float(pa)
+            fb_f, fa_f = float(fb), float(fa)
+        except Exception:
+            continue
+        if min(pb_f, pa_f, fb_f, fa_f) <= 0 or pa_f < pb_f or fa_f < fb_f:
+            continue
+
+        pm = (pb_f + pa_f) / 2.0
+        fm = (fb_f + fa_f) / 2.0
+        spread_bps = ((pa_f - pb_f) / pm + (fa_f - fb_f) / fm) * 10000.0
+        if not math.isfinite(spread_bps) or spread_bps > MAX_PAIR_SPREAD_BPS:
+            continue
+
+        if newest_selected_ts is not None and newest_selected_ts - ts_i < min_gap_ms:
+            continue
+
+        vals.append(basis_f)
+        newest_selected_ts = ts_i
+        if len(vals) >= HISTORY_WINDOW:
+            break
+
     n = len(vals)
     if n < 2:
-        return {"n": n, "mean": None, "sd": None, "z": None, "deviation_bps": None}
+        return {
+            "n": n, "mean": None, "sd": None, "median": None,
+            "robust_sd": None, "z": None, "z_classic": None,
+            "deviation_bps": None,
+        }
+
     mean = sum(vals) / n
     var = sum((x - mean) ** 2 for x in vals) / max(n - 1, 1)
     sd = math.sqrt(var)
-    deviation = current_mid_basis - mean
-    z = deviation / sd if sd > 1e-9 else 0.0
-    return {"n": n, "mean": mean, "sd": sd, "z": z, "deviation_bps": deviation}
+
+    median = float(statistics.median(vals))
+    mad = float(statistics.median([abs(x - median) for x in vals]))
+    robust_sd = 1.4826 * mad
+    scale = robust_sd if robust_sd > 1e-9 else sd
+
+    deviation = current_mid_basis - median
+    z = deviation / scale if scale > 1e-9 else 0.0
+    z_classic = (current_mid_basis - mean) / sd if sd > 1e-9 else 0.0
+
+    return {
+        "n": n,
+        "mean": mean,
+        "sd": sd,
+        "median": median,
+        "robust_sd": robust_sd,
+        "z": z,
+        "z_classic": z_classic,
+        "deviation_bps": deviation,
+    }
 
 
 def _funding_bps_per_hour(ticker: dict[str, Any]) -> tuple[float | None, float | None]:
@@ -298,14 +362,22 @@ def scan_opportunities(
         if min(pb, pa, fb, fa, pm, fm) <= 0:
             continue
 
+        perp_spread_bps = ((pa - pb) / pm) * 10000.0
+        fixed_spread_bps = ((fa - fb) / fm) * 10000.0
+        spread_roundtrip_bps = max(perp_spread_bps, 0.0) + max(fixed_spread_bps, 0.0)
+        quote_quality_ok = spread_roundtrip_bps <= MAX_PAIR_SPREAD_BPS
+
         # One scalar basis series (fixed vs perpetual) is used for statistical
-        # relative-value discovery. We trade deviations from its own history,
-        # not the absolute carry to expiry.
+        # relative-value discovery. The baseline excludes wide/stale historical
+        # quotes and is time-decimated; z-score uses robust median/MAD scale.
         mid_basis = (fm / pm - 1.0) * 10000.0
         stats = _history_stats(perp_symbol, fixed_symbol, mid_basis, db_path)
         z = stats["z"]
+        z_classic = stats["z_classic"]
         n_hist = int(stats["n"])
         mean_basis = stats["mean"]
+        median_basis = stats["median"]
+        robust_sd = stats["robust_sd"]
         deviation_bps = stats["deviation_bps"]
 
         if deviation_bps is not None and deviation_bps >= 0:
@@ -314,10 +386,6 @@ def scan_opportunities(
         else:
             direction = "SHORT_PERP_LONG_FIXED"
             executable = (pb / fa - 1.0) * 10000.0
-
-        perp_spread_bps = ((pa - pb) / pm) * 10000.0
-        fixed_spread_bps = ((fa - fb) / fm) * 10000.0
-        spread_roundtrip_bps = max(perp_spread_bps, 0.0) + max(fixed_spread_bps, 0.0)
 
         funding_raw, funding_bph = _funding_bps_per_hour(pt)
         funding_effect = None
@@ -334,7 +402,8 @@ def scan_opportunities(
         net_proxy = deviation_abs - total_friction_bps
         annualized_basis_pct = (mid_basis / 100.0) * (365.0 / days) if days > 0 else None
         eligible = bool(
-            n_hist >= MIN_HISTORY
+            quote_quality_ok
+            and n_hist >= MIN_HISTORY
             and z is not None
             and abs(float(z)) >= ENTRY_Z
             and net_proxy >= MIN_NET_EDGE_BPS
@@ -353,11 +422,15 @@ def scan_opportunities(
             "fixed_ask": fa,
             "mid_basis_bps": round(mid_basis, 4),
             "historical_mean_basis_bps": round(float(mean_basis), 4) if mean_basis is not None else None,
+            "historical_median_basis_bps": round(float(median_basis), 4) if median_basis is not None else None,
+            "robust_scale_bps": round(float(robust_sd), 4) if robust_sd is not None else None,
             "basis_deviation_bps": round(float(deviation_bps), 4) if deviation_bps is not None else None,
             "executable_basis_bps": round(executable, 4),
             "annualized_mid_basis_pct": round(annualized_basis_pct, 3) if annualized_basis_pct is not None else None,
             "maker_fee_floor_bps": round(fee_floor, 4),
             "spread_roundtrip_bps": round(spread_roundtrip_bps, 4),
+            "max_pair_spread_bps": MAX_PAIR_SPREAD_BPS,
+            "quote_quality_ok": quote_quality_ok,
             "adverse_buffer_bps": round(ADVERSE_BUFFER_BPS, 4),
             "adverse_funding_bps_max_hold": round(adverse_funding_bps, 4),
             "total_friction_bps": round(total_friction_bps, 4),
@@ -368,7 +441,9 @@ def scan_opportunities(
             "history_n": n_hist,
             "min_history": MIN_HISTORY,
             "entry_z_threshold": ENTRY_Z,
+            "history_sample_s": HISTORY_SAMPLE_S,
             "zscore": round(float(z), 3) if z is not None else None,
+            "zscore_classic": round(float(z_classic), 3) if z_classic is not None else None,
             "eligible": eligible,
             "research_only": True,
             "live_orders": False,
@@ -418,6 +493,8 @@ def scan_opportunities(
         "adverse_buffer_bps": ADVERSE_BUFFER_BPS,
         "min_net_edge_bps": MIN_NET_EDGE_BPS,
         "min_history": MIN_HISTORY,
+        "history_sample_s": HISTORY_SAMPLE_S,
+        "max_pair_spread_bps": MAX_PAIR_SPREAD_BPS,
         "entry_z": ENTRY_Z,
         "exit_z": EXIT_Z,
         "stop_z": STOP_Z,
@@ -783,8 +860,8 @@ def selftest() -> dict[str, Any]:
         {"symbol": ff, "tradeable": True},
     ]
     tickers = {
-        "PF_XBTUSD": {"symbol": "PF_XBTUSD", "bid": 100.0, "ask": 100.1, "fundingRate": 0.0001},
-        ff: {"symbol": ff, "bid": 101.0, "ask": 101.1},
+        "PF_XBTUSD": {"symbol": "PF_XBTUSD", "bid": 100.0, "ask": 100.02, "fundingRate": 0.0001},
+        ff: {"symbol": ff, "bid": 101.0, "ask": 101.02},
     }
     test_db = Path("data/relative_value_selftest.db")
     if test_db.exists():
@@ -803,14 +880,14 @@ def selftest() -> dict[str, Any]:
                     funding_rate_raw,funding_bps_per_hour,zscore,eligible
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    now_ms() - (MIN_HISTORY - i) * 10000,
+                    now_ms() - (MIN_HISTORY - i) * int(max(HISTORY_SAMPLE_S, 30.0) * 1000),
                     "XBTUSD", "PF_XBTUSD", ff, future_date.isoformat(), 90.0,
-                    "LONG_PERP_SHORT_FIXED", 100.0, 100.1, 100.35, 100.45,
+                    "LONG_PERP_SHORT_FIXED", 100.0, 100.02, 100.35, 100.37,
                     30.0 + (i % 3) * 0.2, 20.0, 8.0, 4.0, 5.0,
                     0.001, 0.1, 0.0, 0,
                 ),
             )
-    tickers[ff] = {"symbol": ff, "bid": 101.0, "ask": 101.05}
+    tickers[ff] = {"symbol": ff, "bid": 101.0, "ask": 101.02}
     r = scan_opportunities(instruments, tickers, test_db, persist=True)
     opened = maybe_open_paper_pairs(r, test_db)
     ps = paper_status(r, test_db)
