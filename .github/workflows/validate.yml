@@ -28,7 +28,7 @@ jobs:
       - run: python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - shell: pwsh
         run: |
-          foreach ($f in @("./spustit_vse.ps1","./start_v4_neutral.ps1","./start_v4_aggressive.ps1","./prepare_futures.ps1","./spustit_supervisor.ps1","./spustit_komplet.ps1","./arm_live.ps1","./disarm_live.ps1","./arm_rv_live.ps1","./disarm_rv_live.ps1","./spustit_rv_live.ps1","./spustit_futures_canary.ps1","./spustit_futures_manager.ps1","./stav_impulse.ps1")) {
+          foreach ($f in @("./spustit_vse.ps1","./start_v4_neutral.ps1","./start_v4_aggressive.ps1","./prepare_futures.ps1","./spustit_supervisor.ps1","./spustit_komplet.ps1","./arm_live.ps1","./disarm_live.ps1","./arm_rv_live.ps1","./disarm_rv_live.ps1","./spustit_rv_live.ps1","./spustit_futures_canary.ps1","./spustit_futures_batch.ps1","./spustit_futures_manager.ps1","./stav_impulse.ps1")) {
             $null = [scriptblock]::Create((Get-Content -Raw $f))
             Write-Host "$f syntax OK"
           }
