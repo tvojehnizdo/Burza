@@ -41,7 +41,7 @@ $env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $pair[1]
 try {
     Write-Host ""
     Write-Host "FUTURES CANARY - ONE SHOT AUTO WATCH" -ForegroundColor Cyan
-    Write-Host "Max 1 LIVE pozice, hard cap 3 USD, pouze XBT/ETH/SOL." -ForegroundColor Yellow
+    Write-Host "Max 1 LIVE pozice, hard cap 3 USD, dynamicky Kraken PF_*USD perpetual universe." -ForegroundColor Yellow
     Write-Host "Po vstupu: reduce-only STOP + TAKE PROFIT." -ForegroundColor Yellow
     Write-Host "Pokud ochrana selze, executor zkusi okamzite zplosteni." -ForegroundColor Yellow
     Write-Host ""
