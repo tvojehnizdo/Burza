@@ -100,7 +100,15 @@ if (Test-Path $FuturesStore) {
     if ($fp) {
         $env:KRAKEN_FUTURES_API_KEY = Secure-ToPlain $fp[0]
         $env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $fp[1]
-        Write-Host "Kraken Futures credentials loaded from DPAPI store." -ForegroundColor Green
+        & $Python futures_private.py --readiness *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Kraken Futures credentials loaded and permissions are safe." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Kraken Futures key ma nebezpecne Transfer/Withdrawal opravneni. Futures control bude v Supervisoru deaktivovan, dokud nevytvoris key s Transfer/Withdrawal = NO ACCESS." -ForegroundColor Yellow
+            Remove-Item Env:KRAKEN_FUTURES_API_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:KRAKEN_FUTURES_API_SECRET -ErrorAction SilentlyContinue
+        }
     }
 }
 
