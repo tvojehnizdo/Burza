@@ -17,13 +17,26 @@ from microstructure import DB_PATH, connect_db, get_meta, init_db, now_ms, set_m
 START_CAPITAL = float(os.getenv("START_CAPITAL", "5000"))
 MAX_DD_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "10"))
 ALPHA_INTERVAL_S = int(os.getenv("ALPHA_INTERVAL_S", "30"))
-ALPHA_COST_BPS = float(os.getenv("V4_EXEC_ROUNDTRIP_BPS", "14"))
+EXECUTION_MODE = os.getenv("V4_EXECUTION_MODE", "market_taker").strip().lower()
+KRAKEN_MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))
+KRAKEN_TAKER_FEE_BPS = float(os.getenv("KRAKEN_TAKER_BPS", "80"))
+SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "2"))
+EXECUTION_PENALTY_BPS = float(os.getenv("EXECUTION_PENALTY_BPS", "3"))
+DEFAULT_ROUNDTRIP_COST_BPS = (
+    2.0 * (KRAKEN_TAKER_FEE_BPS if EXECUTION_MODE == "market_taker" else KRAKEN_MAKER_FEE_BPS)
+    + 2.0 * SLIPPAGE_BPS
+    + EXECUTION_PENALTY_BPS
+)
+ALPHA_COST_BPS = float(os.getenv("V4_EXEC_ROUNDTRIP_BPS", str(DEFAULT_ROUNDTRIP_COST_BPS)))
 ALPHA_MIN_TRAIN = int(os.getenv("ALPHA_MIN_TRAIN", "40"))
 ALPHA_MIN_VALID = int(os.getenv("ALPHA_MIN_VALID", "18"))
 ALPHA_MIN_NET_BPS = float(os.getenv("ALPHA_MIN_NET_BPS", "2.0"))
 ALPHA_MAX_SPREAD_BPS = float(os.getenv("ALPHA_MAX_SPREAD_BPS", "8"))
 PAPER_ALLOC_PCT = float(os.getenv("PAPER_ALLOC_PCT", "25")) / 100.0
 MAX_ROWS = int(os.getenv("ALPHA_MAX_ROWS", "150000"))
+VALIDATED_HORIZONS = tuple(
+    int(x.strip()) for x in os.getenv("VALIDATED_HORIZONS", "60,120,300,600").split(",") if x.strip()
+)
 
 # Shadow paper is deliberately isolated from the validated PAPER ledger and LIVE gate.
 # It records weaker, explicitly unvalidated state candidates to build evidence faster.
@@ -32,11 +45,12 @@ SHADOW_MIN_TRAIN = int(os.getenv("SHADOW_MIN_TRAIN", "8"))
 SHADOW_MIN_VALID = int(os.getenv("SHADOW_MIN_VALID", "4"))
 SHADOW_MIN_GROSS_BPS = float(os.getenv("SHADOW_MIN_GROSS_BPS", "0.25"))
 SHADOW_MIN_HIT = float(os.getenv("SHADOW_MIN_HIT", "0.48"))
+SHADOW_MIN_NET_BPS = float(os.getenv("SHADOW_MIN_NET_BPS", "0.0"))
 SHADOW_MAX_OPEN = int(os.getenv("SHADOW_MAX_OPEN", "8"))
 SHADOW_ALLOC_PCT = float(os.getenv("SHADOW_ALLOC_PCT", "12.5")) / 100.0
 SHADOW_MAX_DD_PCT = float(os.getenv("SHADOW_MAX_DRAWDOWN_PCT", "35"))
 SHADOW_HORIZONS = tuple(
-    int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "15,30,60,120").split(",") if x.strip()
+    int(x.strip()) for x in os.getenv("SHADOW_HORIZONS", "30,60,120,300,600,900").split(",") if x.strip()
 )
 
 
@@ -161,7 +175,10 @@ def discover_dataframe(
         }
 
     cutoff = int(x["ts_ms"].quantile(0.70))
-    train = x[x.ts_ms <= cutoff]
+    # Purge the label horizon before validation so no training label can look
+    # into the validation period.
+    embargo_ms = int(horizon_s * 1000)
+    train = x[x.ts_ms <= cutoff - embargo_ms]
     valid = x[x.ts_ms > cutoff]
     models: list[dict[str, Any]] = []
 
@@ -182,6 +199,9 @@ def discover_dataframe(
         if not same_direction:
             continue
         if tm["net_mean_bps"] < min_net_bps or vm["net_mean_bps"] < min_net_bps:
+            continue
+        # Avoid a model being approved only because of a few large outliers.
+        if tm["net_median_bps"] <= 0 or vm["net_median_bps"] <= 0:
             continue
         if tm["hit_rate"] < 0.53 or vm["hit_rate"] < 0.52:
             continue
@@ -229,7 +249,8 @@ def discover_shadow_models(raw: pd.DataFrame) -> list[dict[str, Any]]:
         if len(x) < SHADOW_MIN_TRAIN + SHADOW_MIN_VALID:
             continue
         cutoff = int(x["ts_ms"].quantile(0.70))
-        train = x[x.ts_ms <= cutoff]
+        embargo_ms = int(horizon_s * 1000)
+        train = x[x.ts_ms <= cutoff - embargo_ms]
         valid = x[x.ts_ms > cutoff]
         for (symbol, state), tg in train.groupby(["symbol", "state_key"]):
             if len(tg) < SHADOW_MIN_TRAIN:
@@ -261,7 +282,10 @@ def discover_shadow_models(raw: pd.DataFrame) -> list[dict[str, Any]]:
                 1.0,
             )
             robust_gross = min(train_gross, valid_gross)
-            score = robust_gross * math.sqrt(n_eff) / noise
+            net_edge = robust_gross - ALPHA_COST_BPS
+            cost_positive = net_edge >= SHADOW_MIN_NET_BPS
+            score_base = net_edge if cost_positive else robust_gross
+            score = score_base * math.sqrt(n_eff) / noise
             all_models.append({
                 "symbol": symbol,
                 "state_key": state,
@@ -269,14 +293,18 @@ def discover_shadow_models(raw: pd.DataFrame) -> list[dict[str, Any]]:
                 "horizon_s": int(horizon_s),
                 "score": round(float(score), 5),
                 "gross_edge_bps": round(float(robust_gross), 4),
-                "net_edge_proxy_bps": round(float(robust_gross - ALPHA_COST_BPS), 4),
+                "net_edge_proxy_bps": round(float(net_edge), 4),
+                "cost_positive": bool(cost_positive),
                 "train_n": int(len(train_signed)),
                 "valid_n": int(len(valid_signed)),
                 "train_hit": round(train_hit, 5),
                 "valid_hit": round(valid_hit, 5),
-                "validation_level": "UNVALIDATED_SHADOW",
+                "validation_level": "COST_POSITIVE_SHADOW" if cost_positive else "UNVALIDATED_SHADOW",
             })
-    all_models.sort(key=lambda z: (z["score"], z["gross_edge_bps"]), reverse=True)
+    all_models.sort(
+        key=lambda z: (bool(z.get("cost_positive")), z["score"], z["gross_edge_bps"]),
+        reverse=True,
+    )
     return all_models[:200]
 
 
@@ -286,36 +314,56 @@ def discover_models(db_path: Path = DB_PATH) -> dict[str, Any]:
         "generated_ms": now_ms(),
         "rows": len(raw),
         "cost_bps": ALPHA_COST_BPS,
+        "execution_mode": EXECUTION_MODE,
+        "cost_model": {
+            "maker_fee_bps_one_way": KRAKEN_MAKER_FEE_BPS,
+            "taker_fee_bps_one_way": KRAKEN_TAKER_FEE_BPS,
+            "slippage_bps_one_way": SLIPPAGE_BPS,
+            "execution_penalty_bps_roundtrip": EXECUTION_PENALTY_BPS,
+        },
         "horizons": {},
         "consensus": [],
     }
-    for h in (30, 60):
+    for h in VALIDATED_HORIZONS:
         result["horizons"][str(h)] = discover_dataframe(raw, h)
 
-    m30 = {
-        (m["symbol"], m["state_key"]): m
-        for m in result["horizons"]["30"]["models"]
-    }
-    m60 = {
-        (m["symbol"], m["state_key"]): m
-        for m in result["horizons"]["60"]["models"]
-    }
+    # Require agreement across two adjacent horizons. This opens the time
+    # window without weakening the per-horizon validation requirements.
     consensus = []
-    for key, a in m30.items():
-        b = m60.get(key)
-        if not b or a["side"] != b["side"]:
-            continue
-        consensus.append({
-            "symbol": a["symbol"],
-            "state_key": a["state_key"],
-            "side": a["side"],
-            "score": round(min(a["score"], b["score"]), 5),
-            "edge30_bps": a["robust_edge_bps"],
-            "edge60_bps": b["robust_edge_bps"],
-            "n30_valid": a["validation"]["n"],
-            "n60_valid": b["validation"]["n"],
-        })
-    consensus.sort(key=lambda z: (z["score"], min(z["edge30_bps"], z["edge60_bps"])), reverse=True)
+    for h1, h2 in zip(VALIDATED_HORIZONS, VALIDATED_HORIZONS[1:]):
+        left = {
+            (m["symbol"], m["state_key"]): m
+            for m in result["horizons"][str(h1)]["models"]
+        }
+        right = {
+            (m["symbol"], m["state_key"]): m
+            for m in result["horizons"][str(h2)]["models"]
+        }
+        for key, a in left.items():
+            b = right.get(key)
+            if not b or a["side"] != b["side"]:
+                continue
+            robust_edge = min(a["robust_edge_bps"], b["robust_edge_bps"])
+            consensus.append({
+                "symbol": a["symbol"],
+                "state_key": a["state_key"],
+                "side": a["side"],
+                "score": round(min(a["score"], b["score"]), 5),
+                "robust_edge_bps": robust_edge,
+                "horizon_pair": [int(h1), int(h2)],
+                "holding_horizon_s": int(h2),
+                "n_valid_min": min(a["validation"]["n"], b["validation"]["n"]),
+            })
+    # Keep only the best horizon-pair for the same live state.
+    best_by_state: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in consensus:
+        key = (item["symbol"], item["state_key"])
+        prev = best_by_state.get(key)
+        if prev is None or (item["score"], item["robust_edge_bps"]) > (prev["score"], prev["robust_edge_bps"]):
+            best_by_state[key] = item
+    consensus = list(best_by_state.values())
+    consensus.sort(key=lambda z: (z["score"], z["robust_edge_bps"]), reverse=True)
+    result["validated_horizons"] = list(VALIDATED_HORIZONS)
     result["consensus"] = consensus[:50]
     result["shadow_candidates"] = discover_shadow_models(raw) if SHADOW_ENABLED else []
     return result
@@ -422,10 +470,13 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
             continue
         if float(row.spread_bps) > ALPHA_MAX_SPREAD_BPS:
             continue
-        options = by_state.get((row.symbol, row.state_key), [])
+        options = [
+            z for z in by_state.get((row.symbol, row.state_key), [])
+            if bool(z.get("cost_positive"))
+        ]
         if not options:
             continue
-        model = max(options, key=lambda z: (z["score"], z["gross_edge_bps"]))
+        model = max(options, key=lambda z: (z["score"], z["net_edge_proxy_bps"]))
         matches.append((model["score"], model, row))
     matches.sort(key=lambda z: z[0], reverse=True)
 
@@ -441,7 +492,7 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
                 (
                     t, row.symbol, model["side"], model["horizon_s"], float(row.mid), notional,
                     model["gross_edge_bps"], model["score"], ALPHA_COST_BPS,
-                    row.state_key, "UNVALIDATED_STATE",
+                    row.state_key, "COST_POSITIVE_SHADOW",
                 ),
             )
             trade_id = cur.lastrowid
@@ -452,7 +503,7 @@ def maybe_open_shadow_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> 
             "gross_edge_bps": model["gross_edge_bps"],
             "net_edge_proxy_bps": model["net_edge_proxy_bps"],
             "score": model["score"], "state_key": row.state_key,
-            "validation_level": "UNVALIDATED_SHADOW",
+            "validation_level": model["validation_level"],
         })
     return opened
 
@@ -539,8 +590,8 @@ def maybe_open_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> dict[st
                 model_edge_bps,model_score,cost_bps,state_key,status
             ) VALUES(?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
             (
-                t, row.symbol, model["side"], 30, float(row.mid), notional,
-                min(model["edge30_bps"], model["edge60_bps"]),
+                t, row.symbol, model["side"], int(model["holding_horizon_s"]), float(row.mid), notional,
+                model["robust_edge_bps"],
                 model["score"], ALPHA_COST_BPS, row.state_key,
             ),
         )
@@ -548,7 +599,9 @@ def maybe_open_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> dict[st
     return {
         "id": trade_id, "symbol": row.symbol, "side": model["side"],
         "entry": float(row.mid), "notional_czk": round(notional, 2),
-        "edge_bps": min(model["edge30_bps"], model["edge60_bps"]),
+        "horizon_s": int(model["holding_horizon_s"]),
+        "edge_bps": model["robust_edge_bps"],
+        "horizon_pair": model["horizon_pair"],
         "score": model["score"], "state_key": row.state_key,
     }
 
@@ -644,6 +697,10 @@ class AlphaRuntime:
                 "open_trades": shadow_open_n,
                 "closed_trades": shadow_closed_n,
                 "candidate_count": len(self.last_models.get("shadow_candidates", [])) if self.last_models else 0,
+                "cost_positive_candidate_count": (
+                    sum(1 for x in self.last_models.get("shadow_candidates", []) if x.get("cost_positive"))
+                    if self.last_models else 0
+                ),
                 "recent": recent_shadow,
                 "counts_for_live_gate": False,
             },
