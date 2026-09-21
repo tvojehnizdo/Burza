@@ -22,6 +22,15 @@ MIN_DAYS_TO_EXPIRY = float(os.getenv("RV_MIN_DAYS_TO_EXPIRY", "0.5"))
 MAX_DAYS_TO_EXPIRY = float(os.getenv("RV_MAX_DAYS_TO_EXPIRY", "220"))
 HISTORY_WINDOW = int(os.getenv("RV_HISTORY_WINDOW", "500"))
 
+PAPER_ENABLED = os.getenv("RV_PAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+PAPER_START_EQUITY = float(os.getenv("RV_PAPER_START_EQUITY", os.getenv("START_CAPITAL", "5000")))
+PAPER_ALLOC_PCT = float(os.getenv("RV_PAPER_ALLOC_PCT", "15")) / 100.0
+PAPER_MAX_OPEN = int(os.getenv("RV_PAPER_MAX_OPEN", "2"))
+PAPER_TAKE_BPS = float(os.getenv("RV_PAPER_TAKE_BPS", "6"))
+PAPER_STOP_BPS = float(os.getenv("RV_PAPER_STOP_BPS", "25"))
+PAPER_MAX_HOLD_H = float(os.getenv("RV_PAPER_MAX_HOLD_H", "24"))
+PAPER_REENTRY_COOLDOWN_S = float(os.getenv("RV_PAPER_REENTRY_COOLDOWN_S", "300"))
+
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "ImpulseMax5K-RelativeValue/1.0", "Accept": "application/json"})
 
@@ -121,6 +130,66 @@ def init_db(path: Path = DB_PATH) -> None:
         con.execute(
             "CREATE INDEX IF NOT EXISTS idx_rv_pair_ts ON rv_snapshots(perp_symbol,fixed_symbol,ts_ms)"
         )
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS rv_meta(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )"""
+        )
+        con.execute(
+            """CREATE TABLE IF NOT EXISTS rv_paper_pairs(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_ms INTEGER NOT NULL,
+                closed_ms INTEGER,
+                root TEXT NOT NULL,
+                perp_symbol TEXT NOT NULL,
+                fixed_symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                notional_per_leg_czk REAL NOT NULL,
+                entry_perp_px REAL NOT NULL,
+                entry_fixed_px REAL NOT NULL,
+                entry_edge_bps REAL NOT NULL,
+                entry_funding_bps_h REAL,
+                exit_perp_px REAL,
+                exit_fixed_px REAL,
+                gross_pnl_czk REAL,
+                fees_czk REAL,
+                funding_proxy_czk REAL,
+                pnl_czk REAL,
+                net_pnl_bps REAL,
+                exit_reason TEXT,
+                status TEXT NOT NULL
+            )"""
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rv_paper_status ON rv_paper_pairs(status,opened_ms)"
+        )
+
+
+def _meta_get(key: str, default: float, path: Path = DB_PATH) -> float:
+    init_db(path)
+    with sqlite3.connect(path) as con:
+        row = con.execute("SELECT value FROM rv_meta WHERE key=?", (key,)).fetchone()
+    if not row:
+        return float(default)
+    try:
+        return float(row[0])
+    except Exception:
+        return float(default)
+
+
+def _meta_set(key: str, value: float, path: Path = DB_PATH) -> None:
+    init_db(path)
+    with sqlite3.connect(path) as con:
+        con.execute(
+            """INSERT INTO rv_meta(key,value) VALUES(?,?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (key, str(float(value))),
+        )
+
+
+def paper_equity(path: Path = DB_PATH) -> float:
+    return _meta_get("paper_equity", PAPER_START_EQUITY, path)
 
 
 def _history_zscore(perp: str, fixed: str, current: float, path: Path = DB_PATH) -> tuple[float | None, int]:
@@ -317,6 +386,263 @@ def scan_opportunities(
     }
 
 
+def _pair_map(scan: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    return {
+        (str(x.get("perp_symbol")), str(x.get("fixed_symbol"))): x
+        for x in scan.get("all", [])
+        if x.get("perp_symbol") and x.get("fixed_symbol")
+    }
+
+
+def _paper_mark(trade: tuple[Any, ...], quote: dict[str, Any], now: int) -> dict[str, float | int]:
+    (
+        trade_id, opened_ms, direction, notional, entry_perp, entry_fixed,
+        entry_funding_bps_h,
+    ) = trade
+    n = float(notional)
+    hours = max(0.0, (now - int(opened_ms)) / 3_600_000.0)
+    fee_rate = MAKER_FEE_BPS / 10000.0
+
+    pb = float(quote["perp_bid"])
+    pa = float(quote["perp_ask"])
+    fb = float(quote["fixed_bid"])
+    fa = float(quote["fixed_ask"])
+
+    if direction == "LONG_PERP_SHORT_FIXED":
+        exit_perp = pb
+        exit_fixed = fa
+        perp_ret = exit_perp / float(entry_perp) - 1.0
+        fixed_ret = 1.0 - exit_fixed / float(entry_fixed)
+        funding_sign = -1.0
+    else:
+        exit_perp = pa
+        exit_fixed = fb
+        perp_ret = 1.0 - exit_perp / float(entry_perp)
+        fixed_ret = exit_fixed / float(entry_fixed) - 1.0
+        funding_sign = 1.0
+
+    gross = n * (perp_ret + fixed_ret)
+    fees = 4.0 * n * fee_rate
+    funding_bps_h = float(entry_funding_bps_h or 0.0)
+    funding_proxy = n * funding_sign * funding_bps_h * hours / 10000.0
+    pnl = gross - fees + funding_proxy
+    net_bps = pnl / n * 10000.0 if n > 0 else 0.0
+
+    return {
+        "id": int(trade_id),
+        "exit_perp_px": exit_perp,
+        "exit_fixed_px": exit_fixed,
+        "gross_pnl_czk": gross,
+        "fees_czk": fees,
+        "funding_proxy_czk": funding_proxy,
+        "pnl_czk": pnl,
+        "net_pnl_bps": net_bps,
+        "hours": hours,
+    }
+
+
+def resolve_paper_pairs(scan: dict[str, Any], path: Path = DB_PATH) -> list[dict[str, Any]]:
+    if not PAPER_ENABLED:
+        return []
+    qmap = _pair_map(scan)
+    now = now_ms()
+    closed: list[dict[str, Any]] = []
+    init_db(path)
+
+    with sqlite3.connect(path) as con:
+        rows = con.execute(
+            """SELECT id,opened_ms,direction,notional_per_leg_czk,
+                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,
+                      perp_symbol,fixed_symbol
+               FROM rv_paper_pairs WHERE status='OPEN'"""
+        ).fetchall()
+
+        for r in rows:
+            quote = qmap.get((str(r[7]), str(r[8])))
+            if not quote:
+                continue
+            mark = _paper_mark(r[:7], quote, now)
+            reason = None
+            if float(mark["net_pnl_bps"]) >= PAPER_TAKE_BPS:
+                reason = "TAKE_CONVERGENCE"
+            elif float(mark["net_pnl_bps"]) <= -PAPER_STOP_BPS:
+                reason = "STOP_DIVERGENCE"
+            elif float(mark["hours"]) >= PAPER_MAX_HOLD_H:
+                reason = "MAX_HOLD"
+            if reason is None:
+                continue
+
+            con.execute(
+                """UPDATE rv_paper_pairs
+                   SET closed_ms=?,exit_perp_px=?,exit_fixed_px=?,gross_pnl_czk=?,
+                       fees_czk=?,funding_proxy_czk=?,pnl_czk=?,net_pnl_bps=?,
+                       exit_reason=?,status='CLOSED'
+                   WHERE id=?""",
+                (
+                    now, mark["exit_perp_px"], mark["exit_fixed_px"], mark["gross_pnl_czk"],
+                    mark["fees_czk"], mark["funding_proxy_czk"], mark["pnl_czk"],
+                    mark["net_pnl_bps"], reason, mark["id"],
+                ),
+            )
+            closed.append({
+                "id": int(mark["id"]),
+                "reason": reason,
+                "pnl_czk": round(float(mark["pnl_czk"]), 4),
+                "net_pnl_bps": round(float(mark["net_pnl_bps"]), 4),
+            })
+
+    if closed:
+        _meta_set(
+            "paper_equity",
+            paper_equity(path) + sum(float(x["pnl_czk"]) for x in closed),
+            path,
+        )
+    return closed
+
+
+def maybe_open_paper_pairs(scan: dict[str, Any], path: Path = DB_PATH) -> list[dict[str, Any]]:
+    if not PAPER_ENABLED:
+        return []
+
+    candidates = [x for x in scan.get("eligible", []) if bool(x.get("eligible"))]
+    if not candidates:
+        return []
+
+    now = now_ms()
+    init_db(path)
+    with sqlite3.connect(path) as con:
+        open_rows = con.execute(
+            "SELECT perp_symbol,fixed_symbol FROM rv_paper_pairs WHERE status='OPEN'"
+        ).fetchall()
+        recent_rows = con.execute(
+            """SELECT perp_symbol,fixed_symbol,MAX(COALESCE(closed_ms,opened_ms))
+               FROM rv_paper_pairs GROUP BY perp_symbol,fixed_symbol"""
+        ).fetchall()
+
+    open_keys = {(str(r[0]), str(r[1])) for r in open_rows}
+    recent_ms = {(str(r[0]), str(r[1])): int(r[2]) for r in recent_rows if r[2] is not None}
+    slots = max(0, PAPER_MAX_OPEN - len(open_keys))
+    if slots <= 0:
+        return []
+
+    equity = paper_equity(path)
+    notional = max(0.0, min(equity * PAPER_ALLOC_PCT, equity))
+    if notional <= 0:
+        return []
+
+    opened: list[dict[str, Any]] = []
+    for x in candidates:
+        if len(opened) >= slots:
+            break
+        key = (str(x["perp_symbol"]), str(x["fixed_symbol"]))
+        if key in open_keys:
+            continue
+        prev = recent_ms.get(key)
+        if prev is not None and now - prev < int(PAPER_REENTRY_COOLDOWN_S * 1000):
+            continue
+
+        direction = str(x["direction"])
+        if direction == "LONG_PERP_SHORT_FIXED":
+            entry_perp = float(x["perp_ask"])
+            entry_fixed = float(x["fixed_bid"])
+        else:
+            entry_perp = float(x["perp_bid"])
+            entry_fixed = float(x["fixed_ask"])
+
+        funding_bps_h = x.get("funding_bps_per_hour")
+        with sqlite3.connect(path) as con:
+            cur = con.execute(
+                """INSERT INTO rv_paper_pairs(
+                    opened_ms,root,perp_symbol,fixed_symbol,direction,
+                    notional_per_leg_czk,entry_perp_px,entry_fixed_px,
+                    entry_edge_bps,entry_funding_bps_h,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
+                (
+                    now, x["root"], x["perp_symbol"], x["fixed_symbol"], direction,
+                    notional, entry_perp, entry_fixed,
+                    float(x["net_basis_proxy_bps"]),
+                    float(funding_bps_h) if funding_bps_h is not None else None,
+                ),
+            )
+            trade_id = int(cur.lastrowid)
+
+        open_keys.add(key)
+        recent_ms[key] = now
+        opened.append({
+            "id": trade_id,
+            "root": x["root"],
+            "perp_symbol": x["perp_symbol"],
+            "fixed_symbol": x["fixed_symbol"],
+            "direction": direction,
+            "notional_per_leg_czk": round(notional, 2),
+            "entry_edge_bps": float(x["net_basis_proxy_bps"]),
+            "live_orders": False,
+        })
+    return opened
+
+
+def paper_status(scan: dict[str, Any] | None = None, path: Path = DB_PATH) -> dict[str, Any]:
+    init_db(path)
+    qmap = _pair_map(scan or {})
+    now = now_ms()
+    with sqlite3.connect(path) as con:
+        rows = con.execute(
+            """SELECT id,opened_ms,direction,notional_per_leg_czk,
+                      entry_perp_px,entry_fixed_px,entry_funding_bps_h,
+                      perp_symbol,fixed_symbol,root,entry_edge_bps
+               FROM rv_paper_pairs WHERE status='OPEN'
+               ORDER BY opened_ms"""
+        ).fetchall()
+        closed_n = int(con.execute(
+            "SELECT COUNT(*) FROM rv_paper_pairs WHERE status='CLOSED'"
+        ).fetchone()[0])
+        recent = [
+            {
+                "id": r[0], "root": r[1], "direction": r[2], "status": r[3],
+                "pnl_czk": r[4], "net_pnl_bps": r[5], "exit_reason": r[6],
+            }
+            for r in con.execute(
+                """SELECT id,root,direction,status,pnl_czk,net_pnl_bps,exit_reason
+                   FROM rv_paper_pairs ORDER BY id DESC LIMIT 10"""
+            ).fetchall()
+        ]
+
+    open_marks: list[dict[str, Any]] = []
+    unrealized = 0.0
+    for r in rows:
+        quote = qmap.get((str(r[7]), str(r[8])))
+        mark = _paper_mark(r[:7], quote, now) if quote else None
+        if mark:
+            unrealized += float(mark["pnl_czk"])
+        open_marks.append({
+            "id": int(r[0]),
+            "root": r[9],
+            "perp_symbol": r[7],
+            "fixed_symbol": r[8],
+            "direction": r[2],
+            "entry_edge_bps": round(float(r[10]), 4),
+            "mark_net_pnl_bps": round(float(mark["net_pnl_bps"]), 4) if mark else None,
+            "mark_pnl_czk": round(float(mark["pnl_czk"]), 4) if mark else None,
+        })
+
+    realized_equity = paper_equity(path)
+    return {
+        "enabled": PAPER_ENABLED,
+        "realized_equity": round(realized_equity, 2),
+        "marked_equity": round(realized_equity + unrealized, 2),
+        "open_pairs": len(rows),
+        "closed_pairs": closed_n,
+        "max_open": PAPER_MAX_OPEN,
+        "alloc_pct_per_leg": round(PAPER_ALLOC_PCT * 100.0, 2),
+        "take_bps": PAPER_TAKE_BPS,
+        "stop_bps": PAPER_STOP_BPS,
+        "max_hold_h": PAPER_MAX_HOLD_H,
+        "open": open_marks,
+        "recent": recent,
+        "live_orders": False,
+    }
+
+
 class RelativeValueRuntime:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -340,7 +666,13 @@ class RelativeValueRuntime:
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.last_scan = scan_opportunities(db_path=self.db_path, persist=True)
+                scan = scan_opportunities(db_path=self.db_path, persist=True)
+                closed = resolve_paper_pairs(scan, self.db_path)
+                opened = maybe_open_paper_pairs(scan, self.db_path)
+                scan["paper"] = paper_status(scan, self.db_path)
+                scan["paper_opened_this_cycle"] = opened
+                scan["paper_closed_this_cycle"] = closed
+                self.last_scan = scan
                 self.last_scan_ms = now_ms()
                 self.last_error = None
             except Exception as exc:
@@ -364,6 +696,7 @@ class RelativeValueRuntime:
             "pairs_scanned": int(scan.get("pairs_scanned", 0)),
             "eligible_count": int(scan.get("eligible_count", 0)),
             "best": scan.get("best", [])[:5],
+            "paper": scan.get("paper", paper_status(scan, self.db_path)),
             "history_rows": total_rows,
             "live_orders": False,
         }
@@ -382,9 +715,23 @@ def selftest() -> dict[str, Any]:
         "PF_XBTUSD": {"symbol": "PF_XBTUSD", "bid": 100.0, "ask": 100.1, "fundingRate": 0.0001},
         ff: {"symbol": ff, "bid": 101.0, "ask": 101.1},
     }
-    r = scan_opportunities(instruments, tickers, Path("data/relative_value_selftest.db"), persist=False)
-    ok = bool(r["pairs_scanned"] == 1 and r["best"] and r["best"][0]["direction"] == "LONG_PERP_SHORT_FIXED")
-    return {"ok": ok, "result": r}
+    test_db = Path("data/relative_value_selftest.db")
+    if test_db.exists():
+        try:
+            test_db.unlink()
+        except Exception:
+            pass
+    r = scan_opportunities(instruments, tickers, test_db, persist=True)
+    opened = maybe_open_paper_pairs(r, test_db)
+    ps = paper_status(r, test_db)
+    ok = bool(
+        r["pairs_scanned"] == 1
+        and r["best"]
+        and r["best"][0]["direction"] == "LONG_PERP_SHORT_FIXED"
+        and opened
+        and ps["open_pairs"] == 1
+    )
+    return {"ok": ok, "result": r, "paper_opened": opened, "paper_status": ps}
 
 
 if __name__ == "__main__":
