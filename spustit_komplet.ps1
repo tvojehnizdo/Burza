@@ -16,10 +16,13 @@ if ($LASTEXITCODE -ne 0) {
 $Unified = Read-Host "Mas na Kraken zapnuty Unified Wallet? [A/n]"
 if ($Unified.Trim().ToUpperInvariant() -eq "N") {
     Write-Host ""
-    Write-Host "Doporučeno: Settings -> Account -> Trading platform -> Unified Wallet = ON" -ForegroundColor Yellow
-    Write-Host "Díky tomu stejný kapitál slouží pro Spot, Margin i Multi-M Futures bez wallet transferu." -ForegroundColor Cyan
-    try { Start-Process "https://pro.kraken.com/app/settings/account" } catch { }
-    Read-Host "Po zapnutí Unified Wallet stiskni ENTER"
+    Write-Host "Unified Wallet na tomto uctu neni podminkou. Pokud se v Settings -> Account nezobrazuje, pokracujeme v klasickem rezimu oddelenych spot/futures penezene." -ForegroundColor Yellow
+    Write-Host "Spot/margin zustava plne funkcni. Futures pripojime samostatnym Futures API klicem." -ForegroundColor Cyan
+    $tryUnified = Read-Host "Chces jeste jednou otevrit Kraken Account settings kvuli Unified Wallet? [a/N]"
+    if ($tryUnified.Trim().ToUpperInvariant() -in @("A","Y")) {
+        try { Start-Process "https://pro.kraken.com/app/settings/account" } catch { }
+        Read-Host "Po kontrole stiskni ENTER"
+    }
 }
 
 $FuturesStore = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
