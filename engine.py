@@ -696,14 +696,60 @@ def v4_status():
 
 
 
-def _read_kraken_readiness() -> dict[str, Any]:
-    path = Path("reports/kraken-readiness-latest.json")
+def _read_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
+
+
+def _read_kraken_readiness() -> dict[str, Any]:
+    return _read_json_file(Path("reports/kraken-readiness-latest.json"))
+
+
+def _normalized_account_balances() -> dict[str, float]:
+    merged: dict[str, float] = {}
+
+    def add(asset: Any, value: Any) -> None:
+        try:
+            amount = float(value)
+        except Exception:
+            return
+        if not np.isfinite(amount) or amount <= 0:
+            return
+        key = str(asset).upper().strip()
+        # Kraken may expose wallet/location suffixes such as .F / .S.
+        base = key.split(".", 1)[0]
+        aliases = {key, base}
+        if base == "ZUSD":
+            aliases.add("USD")
+        elif base == "USD":
+            aliases.add("ZUSD")
+        for alias in aliases:
+            merged[alias] = merged.get(alias, 0.0) + amount
+
+    readiness = _read_kraken_readiness()
+    for asset, value in (readiness.get("balance_nonzero") or {}).items():
+        add(asset, value)
+
+    inventory = _read_json_file(Path("stav_reporty/kraken_inventory_latest.json"))
+    spot_balances = ((inventory.get("spot") or {}).get("balances") or {})
+    for asset, value in spot_balances.items():
+        add(asset, value)
+
+    stable = inventory.get("stable_balances") or {}
+    for asset, value in stable.items():
+        # stable_balances duplicates spot.balances in current inventory schema;
+        # use it only when the same raw asset was not already represented.
+        raw = str(asset).upper().strip()
+        base = raw.split(".", 1)[0]
+        already = raw in merged or base in merged
+        if not already:
+            add(asset, value)
+
+    return merged
 
 
 def _pair_meta_by_wsname() -> dict[str, tuple[str, dict[str, Any]]]:
@@ -720,8 +766,7 @@ def _pair_meta_by_wsname() -> dict[str, tuple[str, dict[str, Any]]]:
 
 @app.get("/api/v4/fast-canary")
 def v4_fast_canary():
-    readiness = _read_kraken_readiness()
-    balances = readiness.get("balance_nonzero") or {}
+    balances = _normalized_account_balances()
     try:
         return scan_fast_canary(
             balances=balances,
@@ -747,8 +792,7 @@ def v4_executable_candidate():
         if bool(x.get("cost_positive"))
     ]
     if not candidates:
-        readiness = _read_kraken_readiness()
-        balances = readiness.get("balance_nonzero") or {}
+        balances = _normalized_account_balances()
         try:
             fast = scan_fast_canary(
                 balances=balances,
@@ -756,7 +800,7 @@ def v4_executable_candidate():
                 max_spread_bps=25.0,
                 maker_fee_bps_per_side=SPOT_MAKER_FEE_BPS,
                 execution_buffer_bps=4.0,
-                min_net_edge_bps=5.0,
+                min_net_edge_bps=1.0,
             )
             if fast.get("ready"):
                 return {
@@ -795,8 +839,7 @@ def v4_executable_candidate():
         by_state.setdefault((str(model.get("symbol")), str(model.get("state_key"))), []).append(model)
 
     pair_meta = _pair_meta_by_wsname()
-    readiness = _read_kraken_readiness()
-    balances = readiness.get("balance_nonzero") or {}
+    balances = _normalized_account_balances()
     now_candidates: list[dict[str, Any]] = []
 
     for _, row in latest.iterrows():
