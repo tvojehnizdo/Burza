@@ -49,7 +49,7 @@ def scan(
     max_spread_bps: float = 25.0,
     maker_fee_bps_per_side: float = 40.0,
     execution_buffer_bps: float = 4.0,
-    min_net_edge_bps: float = 5.0,
+    min_net_edge_bps: float = 1.0,
 ) -> dict[str, Any]:
     markets = discover(max_pairs=max_pairs, max_spread_bps=max_spread_bps)
     out: list[dict[str, Any]] = []
@@ -81,6 +81,8 @@ def scan(
         r5 = _ret(close, 5)
         r10 = _ret(close, 10)
         r15 = _ret(close, 15)
+        r30 = _ret(close, 30)
+        r60 = _ret(close, 60)
         ema6 = _ema(close, 6)
         ema20 = _ema(close, 20)
 
@@ -96,13 +98,26 @@ def scan(
         vol_med = float(df["volume"].tail(30).median())
         vol_ratio = float(df["volume"].iloc[-1] / vol_med) if vol_med > 0 else 1.0
 
-        trend_ok = last > ema6 > ema20
-        momentum_ok = r3 > 0 and r5 > 0 and r10 > 0 and r15 > -0.0025
+        recent_high = float(df["high"].tail(20).iloc[:-1].max()) if len(df) >= 21 else last
+        breakout_ok = last >= recent_high
+        trend_ok = (last > ema6 > ema20) or (r15 > 0.0030) or breakout_ok
+        momentum_ok = (
+            (r5 > 0 and r15 > 0)
+            or (r10 > 0 and r30 > 0)
+            or (r30 > 0.0040)
+            or breakout_ok
+        )
 
-        # Conservative forward-move proxy: observed momentum capped by recent
-        # volatility. This is a ranking/filtering proxy, not a profit forecast.
-        momentum_bps = max(r3 * 10000.0, r5 * 10000.0 * 0.75, r10 * 10000.0 * 0.45)
-        vol_cap_bps = max(atr_bps * 2.2, atr_bps)
+        # Longer 15-60m proxy gives the move enough time to overcome Kraken
+        # spot fees while remaining capped by realized 1m volatility.
+        momentum_bps = max(
+            r5 * 10000.0 * 0.55,
+            r10 * 10000.0 * 0.60,
+            r15 * 10000.0 * 0.70,
+            r30 * 10000.0 * 0.55,
+            r60 * 10000.0 * 0.40,
+        )
+        vol_cap_bps = max(atr_bps * 4.5, atr_bps * 2.0)
         expected_move_bps = max(0.0, min(momentum_bps, vol_cap_bps))
 
         spread_bps = float(meta.get("spread_bps") or 0.0)
@@ -125,7 +140,7 @@ def scan(
         quality = (
             trend_ok
             and momentum_ok
-            and vol_ratio >= 0.70
+            and vol_ratio >= 0.45
             and expected_move_bps > 0
             and net_edge_bps >= min_net_edge_bps
             and size_ok
@@ -157,6 +172,9 @@ def scan(
             "r5_bps": round(r5 * 10000.0, 3),
             "r10_bps": round(r10 * 10000.0, 3),
             "r15_bps": round(r15 * 10000.0, 3),
+            "r30_bps": round(r30 * 10000.0, 3),
+            "r60_bps": round(r60 * 10000.0, 3),
+            "breakout_ok": breakout_ok,
             "atr_bps": round(atr_bps, 3),
             "volume_ratio": round(vol_ratio, 3),
             "trend_ok": trend_ok,
