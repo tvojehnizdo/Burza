@@ -1,0 +1,44 @@
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+
+$Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$Store = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
+
+function Secure-ToPlain([Security.SecureString]$Secure) {
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+}
+
+function Load-EncryptedPair([string]$Path) {
+    if (-not (Test-Path $Path)) { return $null }
+    $obj = Get-Content -Raw $Path | ConvertFrom-Json
+    return @(
+        (ConvertTo-SecureString -String ([string]$obj.api_key)),
+        (ConvertTo-SecureString -String ([string]$obj.api_secret))
+    )
+}
+
+if (-not (Test-Path $Python)) { throw "Python venv chybi." }
+$pair = Load-EncryptedPair $Store
+if (-not $pair) { throw "Futures credentials chybi: $Store" }
+
+$env:KRAKEN_FUTURES_API_KEY = Secure-ToPlain $pair[0]
+$env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $pair[1]
+
+try {
+    Write-Host ""
+    Write-Host "FUTURES BOUNDED LIVE SESSION" -ForegroundColor Cyan
+    Write-Host "Spusteni tohoto skriptu = schvaleni cele relace." -ForegroundColor Yellow
+    Write-Host "60 min | max 10 novych vstupu | max 4 soucasne pozice." -ForegroundColor Yellow
+    Write-Host "Max 3 USD/obchod | portfolio max 10 USD | kapitalovy ramec max 22 USD." -ForegroundColor Yellow
+    Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
+    Write-Host "Quick profit + no-progress 3 min + hard exit 8 min + cleanup automaticky." -ForegroundColor Yellow
+    Write-Host ""
+
+    & $Python "futures_session.py" --run --confirm RUN-BOUNDED-LIVE-SESSION
+    if ($LASTEXITCODE -ne 0) { throw "Bounded futures session skoncila s chybou." }
+}
+finally {
+    Remove-Item Env:KRAKEN_FUTURES_API_KEY,Env:KRAKEN_FUTURES_API_SECRET -ErrorAction SilentlyContinue
+}
