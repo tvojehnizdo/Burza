@@ -12,17 +12,18 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-KRAKEN = "https://api.kraken.com"
+KRAKEN = "https://api.kraken.com"\nKRAKEN_FUTURES = "https://futures.kraken.com/api/charts/v1"
 START_CAPITAL = float(os.getenv("START_CAPITAL", "5000"))
 MAX_DD = float(os.getenv("MAX_DRAWDOWN_PCT", "10")) / 100.0
 RISK_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.75")) / 100.0
-MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))
+SPOT_MAKER_FEE_BPS = float(os.getenv("KRAKEN_MAKER_BPS", "40"))\nFUTURES_MAKER_FEE_BPS = float(os.getenv("KRAKEN_FUTURES_MAKER_BPS", "2"))
 SLIPPAGE_BPS = float(os.getenv("SLIPPAGE_BPS", "2"))
 EXECUTION_PENALTY_BPS = float(os.getenv("EXECUTION_PENALTY_BPS", "3"))
 PULSE_MIN = float(os.getenv("PULSE_MIN", "0.64"))
 UNIVERSE_MAX = int(os.getenv("UNIVERSE_MAX", "24"))
 SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
+FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD").split(",") if s.strip()]
 
 app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="2.0")
 SESSION = requests.Session()
@@ -189,7 +190,7 @@ def live_pulse(symbol: str) -> dict[str, Any] | None:
     row = x.iloc[-1]
     p = pulse_logic(row)
     expected_move = max(abs(float(p.get("momentum", 0.0))), 1.6 * float(p.get("atrp", 0.0)))
-    round_trip = 2.0 * per_side_cost_rate()
+    round_trip = 2.0 * per_side_cost_rate("spot")
     net_edge = expected_move - round_trip
     p.update({
         "symbol": symbol,
@@ -204,14 +205,14 @@ def live_pulse(symbol: str) -> dict[str, Any] | None:
     return p
 
 
-def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any]) -> dict[str, Any]:
+def run_bt(df: pd.DataFrame, symbol: str, params: dict[str, Any], market: str = "spot") -> dict[str, Any]:
     x = features(df, params["fast"], params["slow"], params["zwin"])
     eq = START_CAPITAL
     peak = eq
     maxdd = 0.0
     trades: list[Trade] = []
     pos: dict[str, Any] | None = None
-    side_cost = per_side_cost_rate()
+    side_cost = per_side_cost_rate(market)
     warmup = max(params["slow"], params["zwin"], 35)
 
     for i in range(warmup, len(x) - 1):
@@ -345,19 +346,19 @@ def optimize(symbol: str) -> dict[str, Any]:
             "stop_atr": sa, "take_atr": ta, "max_hold": hold,
             "max_alloc": 0.55, "cost_multiple": 1.5
         }
-        tr = run_bt(train, symbol, p)
+        tr = run_bt(train, symbol, p, "spot")
         grid.append((objective(tr), p, tr))
     grid.sort(key=lambda z: z[0], reverse=True)
 
     candidates = []
     for _, p, tr in grid[:12]:
-        va = run_bt(valid, symbol, p)
+        va = run_bt(valid, symbol, p, "spot")
         candidates.append((objective(va), p, tr, va))
     candidates.sort(key=lambda z: z[0], reverse=True)
 
     _, p, tr, va = candidates[0]
-    ho = run_bt(holdout, symbol, p)
-    full = run_bt(df, symbol, p)
+    ho = run_bt(holdout, symbol, p, "spot")
+    full = run_bt(df, symbol, p, "spot")
 
     return {
         "params": p,
@@ -367,6 +368,51 @@ def optimize(symbol: str) -> dict[str, Any]:
         "full": full,
         "data_warning": "REST OHLC is a short recent window; holdout is a smoke test, not proof of durable profitability.",
     }
+
+
+def futures_klines(symbol: str, count: int = 720) -> pd.DataFrame:
+    url = f"{KRAKEN_FUTURES}/trade/{symbol}/1m"
+    r = SESSION.get(url, params={"count": count}, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    rows = data.get("candles", [])
+    if not rows:
+        raise RuntimeError(f"No futures candles for {symbol}")
+    df = pd.DataFrame(rows)
+    required = ["time", "open", "high", "low", "close", "volume"]
+    missing = [x for x in required if x not in df.columns]
+    if missing:
+        raise RuntimeError(f"Unexpected futures candle schema: missing {missing}")
+    df = df.rename(columns={"time": "ts"})
+    for col in ["open", "high", "low", "close", "volume"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["vwap"] = df["close"]
+    df["count"] = 0
+    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms", utc=True)
+    return df[["ts","open","high","low","close","vwap","volume","count"]].dropna().sort_values("ts").reset_index(drop=True)
+
+
+def live_futures_pulse(symbol: str) -> dict[str, Any] | None:
+    x = features(futures_klines(symbol, 240))
+    if len(x) < 60:
+        return None
+    row = x.iloc[-1]
+    p = pulse_logic(row)
+    expected_move = max(abs(float(p.get("momentum", 0.0))), 1.6 * float(p.get("atrp", 0.0)))
+    round_trip = 2.0 * per_side_cost_rate("futures")
+    net_edge = expected_move - round_trip
+    p.update({
+        "symbol": symbol,
+        "market": "futures-paper",
+        "price": round(float(row.close), 10),
+        "atr_pct": round(float(p.get("atrp", 0.0)) * 100, 3),
+        "volume_ratio": round(float(p.get("rv", 0.0)), 3),
+        "expected_move_proxy_pct": round(expected_move * 100, 3),
+        "round_trip_cost_floor_pct": round(round_trip * 100, 3),
+        "net_edge_proxy_pct": round(net_edge * 100, 3),
+        "tradeable": bool(p["pulse"] and net_edge > round_trip * 0.5 and p["confidence"] >= PULSE_MIN),
+    })
+    return p
 
 
 def synthetic_frame(kind: str, n: int = 720, seed: int = 7) -> pd.DataFrame:
@@ -476,6 +522,30 @@ def pulses():
         "best": good[:10],
         "all": out,
         "note": "Candidate scanner only; no real orders are submitted.",
+    }
+
+
+@app.get("/api/futures-pulses")
+def futures_pulses():
+    out = []
+    with ThreadPoolExecutor(max_workers=max(1, min(SCAN_WORKERS, 6))) as ex:
+        futures = {ex.submit(live_futures_pulse, s): s for s in FUTURES_SYMBOLS}
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                p = fut.result()
+                if p:
+                    out.append(p)
+            except Exception as e:
+                out.append({"symbol": s, "error": str(e)})
+    good = [x for x in out if x.get("tradeable")]
+    good.sort(key=lambda x: (x.get("net_edge_proxy_pct", -99), x.get("confidence", 0)), reverse=True)
+    return {
+        "mode": "KRAKEN_FUTURES_PAPER_SCAN",
+        "tradeable": len(good),
+        "best": good,
+        "all": out,
+        "note": "PAPER research only. Notional model is capped below account equity; no live derivatives orders are enabled.",
     }
 
 
