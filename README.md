@@ -247,3 +247,6 @@ Validates the four-slot micro futures portfolio, total exposure cap, dynamic PF_
 
 ### Futures live manager validation v2
 Validates compile plus pure exit-rule selftests for quick-profit, small-profit, no-progress, and hard-max-hold behavior. New live entries remain confirmation-gated.
+
+### Live futures batch validation
+Validates the one-confirmation live futures batch launcher, protected entries, manager handoff, 50% equity kill-switch, and PowerShell syntax.
