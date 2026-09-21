@@ -16,6 +16,8 @@ from futures_canary import (
     MAX_NOTIONAL_PCT_EQUITY,
     MAX_NOTIONAL_USD,
     _exit_limit_price,
+    execute,
+    private_plan,
 )
 from futures_private import (
     cancel_symbol_orders,
@@ -48,6 +50,9 @@ NO_PROGRESS_CURRENT_BPS = 22.0
 ADOPT_STOP_BPS = 45.0
 ADOPT_TAKE_BPS = 45.0
 MAX_SESSION_DRAWDOWN_PCT = 50.0
+SESSION_CAPITAL_USD = 22.0
+SESSION_DURATION_SEC = 60 * 60
+SESSION_MAX_ENTRIES = 10
 MAX_CONSECUTIVE_ERRORS = 5
 
 
@@ -67,6 +72,10 @@ def _load_state() -> dict[str, Any]:
         "version": 1,
         "created_ts_ms": _now_ms(),
         "session_start_equity": None,
+        "session_start_ts_ms": None,
+        "session_deadline_ts_ms": None,
+        "session_entry_count": 0,
+        "session_capital_usd": SESSION_CAPITAL_USD,
         "positions": {},
         "stats": {
             "auto_entries": 0,
@@ -478,7 +487,9 @@ def _drawdown_guard(client: Any, state: dict[str, Any]) -> dict[str, Any] | None
         state["session_start_equity"] = equity
         return None
 
-    threshold = float(start) * (1.0 - MAX_SESSION_DRAWDOWN_PCT / 100.0)
+    allocated = min(SESSION_CAPITAL_USD, float(start))
+    max_loss_usd = allocated * MAX_SESSION_DRAWDOWN_PCT / 100.0
+    threshold = float(start) - max_loss_usd
     if equity > threshold:
         return None
 
@@ -486,6 +497,8 @@ def _drawdown_guard(client: Any, state: dict[str, Any]) -> dict[str, Any] | None
     result.update({
         "equity_usd": equity,
         "session_start_equity": float(start),
+        "session_capital_usd": allocated,
+        "max_loss_usd": max_loss_usd,
         "drawdown_pct_limit": MAX_SESSION_DRAWDOWN_PCT,
         "threshold_equity_usd": threshold,
     })
@@ -547,28 +560,99 @@ def _portfolio_snapshot(client: Any) -> dict[str, Any]:
     }
 
 
+def _session_auto_entry(client: Any, state: dict[str, Any]) -> dict[str, Any]:
+    now = _now_ms()
+    deadline = int(state.get("session_deadline_ts_ms") or 0)
+    entries = int(state.get("session_entry_count") or 0)
+
+    if deadline and now >= deadline:
+        return {"ok": True, "reason": "SESSION_TIME_LIMIT_REACHED"}
+    if entries >= SESSION_MAX_ENTRIES:
+        return {"ok": True, "reason": "SESSION_ENTRY_LIMIT_REACHED"}
+
+    snap = _portfolio_snapshot(client)
+    if int(snap["open_position_count"]) >= MAX_OPEN_POSITIONS:
+        return {"ok": True, "reason": "POSITION_SLOTS_FULL"}
+
+    equity = float(snap["equity_usd"])
+    portfolio_cap = min(
+        MAX_PORTFOLIO_NOTIONAL_USD,
+        equity * MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY / 100.0,
+    )
+    if float(snap["portfolio_notional_usd"]) >= portfolio_cap - 1e-9:
+        return {
+            "ok": True,
+            "reason": "PORTFOLIO_NOTIONAL_FULL",
+            "portfolio_notional_usd": snap["portfolio_notional_usd"],
+            "portfolio_cap_usd": portfolio_cap,
+        }
+
+    plan = private_plan()
+    if not plan.get("ready"):
+        return {
+            "ok": True,
+            "reason": str(plan.get("reason") or "NO_ENTRY"),
+            "candidate": (plan.get("public_scan") or {}).get("candidate"),
+        }
+
+    result = execute()
+    if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
+        state["session_entry_count"] = entries + 1
+        state["stats"]["auto_entries"] = int(state["stats"].get("auto_entries", 0)) + 1
+        symbol = str((result.get("candidate") or {}).get("symbol") or "").upper()
+        _adopt_positions(client, state, client.open_positions(), client.open_orders())
+        _log({
+            "event": "SESSION_AUTO_ENTRY",
+            "symbol": symbol,
+            "session_entry_count": state["session_entry_count"],
+            "result": result,
+        })
+        return {
+            "ok": True,
+            "reason": "SESSION_AUTO_ENTRY_OPENED",
+            "symbol": symbol,
+            "session_entry_count": state["session_entry_count"],
+        }
+
+    if result.get("reason") == "FUTURES_CANARY_ABORTED":
+        state["stats"]["execution_aborts"] = int(state["stats"].get("execution_aborts", 0)) + 1
+
+    _log({"event": "SESSION_AUTO_ENTRY_SKIPPED_OR_ABORTED", "result": result})
+    return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
+
+
 def run_forever() -> None:
     state = _load_state()
     client = client_from_env()
     save_policy(_policy_patch(False))
 
-    # The user's 50% max-loss budget starts fresh when the manager is armed.
     initial = _portfolio_snapshot(client)
+    now = _now_ms()
     state["session_start_equity"] = float(initial["equity_usd"])
+    state["session_start_ts_ms"] = now
+    state["session_deadline_ts_ms"] = now + SESSION_DURATION_SEC * 1000
+    state["session_entry_count"] = 0
+    state["session_capital_usd"] = min(SESSION_CAPITAL_USD, float(initial["equity_usd"]))
     _save_state(state)
 
     errors = 0
 
     _log({
-        "event": "LIVE_MANAGER_START",
+        "event": "LIVE_SESSION_START",
         "pid": os.getpid(),
         "session_start_equity": state["session_start_equity"],
+        "session_capital_usd": state["session_capital_usd"],
+        "session_duration_sec": SESSION_DURATION_SEC,
+        "session_max_entries": SESSION_MAX_ENTRIES,
         "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
     })
-    print("FUTURES LIVE MANAGER: armed")
+    print("FUTURES LIVE SESSION: armed")
     print(
-        f"manage_open_positions_only=true | "
-        f"no_progress={NO_PROGRESS_SEC}s | hard_max={HARD_MAX_HOLD_SEC}s"
+        f"duration={SESSION_DURATION_SEC // 60}min | max_entries={SESSION_MAX_ENTRIES} | "
+        f"slots={MAX_OPEN_POSITIONS} | per_trade_max=USD {MAX_NOTIONAL_USD:.2f} | "
+        f"portfolio_max=USD {MAX_PORTFOLIO_NOTIONAL_USD:.2f} | "
+        f"capital_budget=USD {state['session_capital_usd']:.2f} | "
+        f"max_loss={MAX_SESSION_DRAWDOWN_PCT:.0f}% of allocated capital"
     )
 
     while True:
@@ -583,15 +667,32 @@ def run_forever() -> None:
                 return
 
             actions = _manage_positions(client, state)
+
+            now = _now_ms()
+            deadline = int(state.get("session_deadline_ts_ms") or 0)
+            if deadline and now >= deadline:
+                _save_state(state)
+                print("SESSION END: 60 minute limit reached. No new entries.")
+                return
+
+            entry = _session_auto_entry(client, state)
+            if entry.get("reason") == "SESSION_ENTRY_LIMIT_REACHED":
+                _save_state(state)
+                print("SESSION END: 10 entry limit reached. No new entries.")
+                return
+
             snap = _portfolio_snapshot(client)
             _save_state(state)
 
+            remaining_sec = max(0, (deadline - now) // 1000) if deadline else 0
             print(
                 f"[{time.strftime('%H:%M:%S')}] "
                 f"equity=USD {snap['equity_usd']:.4f} | "
                 f"open={snap['open_position_count']}/{MAX_OPEN_POSITIONS} | "
                 f"notional=USD {snap['portfolio_notional_usd']:.4f} | "
-                f"new_live_entries=confirmation_required | exits={len(actions)}"
+                f"entries={state.get('session_entry_count', 0)}/{SESSION_MAX_ENTRIES} | "
+                f"remaining={remaining_sec}s | "
+                f"entry={entry.get('reason')} | exits={len(actions)}"
             )
             errors = 0
         except KeyboardInterrupt:
@@ -614,8 +715,8 @@ def status() -> dict[str, Any]:
     snap = _portfolio_snapshot(client)
     return {
         "ok": True,
-        "mode": "FUTURES_LIVE_MANAGER",
-        "new_live_entries": "confirmation_required",
+        "mode": "FUTURES_BOUNDED_LIVE_SESSION",
+        "new_live_entries": "autonomous_within_approved_session",
         "autonomous_position_management": True,
         "rules": {
             "loop_sec": LOOP_SEC,
@@ -629,6 +730,9 @@ def status() -> dict[str, Any]:
             "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
             "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
             "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
+            "session_capital_usd": SESSION_CAPITAL_USD,
+            "session_duration_sec": SESSION_DURATION_SEC,
+            "session_max_entries": SESSION_MAX_ENTRIES,
         },
         "exchange": {
             "equity_usd": snap["equity_usd"],
@@ -654,6 +758,8 @@ def selftest() -> dict[str, Any]:
             and MAX_OPEN_POSITIONS == 4
         ),
         "drawdown_limit_is_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "session_is_bounded": SESSION_DURATION_SEC == 3600 and SESSION_MAX_ENTRIES == 10,
+        "capital_budget_is_22": SESSION_CAPITAL_USD == 22.0,
     }
     return {"ok": all(checks.values()), "checks": checks}
 
@@ -723,8 +829,8 @@ def main() -> None:
         return
 
     if args.run:
-        if args.confirm != "ARM-LIVE-MANAGER":
-            raise SystemExit("Live manager requires --confirm ARM-LIVE-MANAGER")
+        if args.confirm != "ARM-22USD-60MIN-10TRADES":
+            raise SystemExit("Bounded live session requires --confirm ARM-22USD-60MIN-10TRADES")
         _acquire_pid_lock()
         try:
             run_forever()
