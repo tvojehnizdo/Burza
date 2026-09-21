@@ -207,3 +207,6 @@ Automatically paper-executes qualifying PF/FF pairs; LIVE orders remain disabled
 
 ### V4.3 statistical RV V2
 Relative-value entries now require a rolling basis history and a >=2-sigma deviation after modeled fees, spread, adverse-selection buffer and short-horizon adverse funding. Uses a fresh V2 paper ledger.
+
+### FAST PAPER profile
+The neutral V2 runner can use a faster PAPER-only profile: 5 s scanning, 1.5-sigma entry, 5 bps minimum modeled net edge, up to 3 simultaneous pairs, 4 h max hold, and 180 s re-entry cooldown. Cost assumptions are unchanged.
