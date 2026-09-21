@@ -202,3 +202,5 @@ and stores observations in `data/relative_value.db`.
 
 Run `start_v4_neutral.ps1` and inspect `/api/v4/relative-value`.
 Directional alpha remains PAPER-only and LIVE orders remain disabled.
+
+Automatically paper-executes qualifying PF/FF pairs; LIVE orders remain disabled.
