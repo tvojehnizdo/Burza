@@ -218,6 +218,23 @@ def readiness(env_file: str | None = None) -> dict[str, Any]:
     }
 
 
+def signature_selftest() -> dict[str, Any]:
+    secret = "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXNsu3eow76sz84Q18fWxnyRzBHCd3pd5nE9qa99HAZtuZuj6F1huXg=="
+    expected = "4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ=="
+    data = {
+        "nonce": "1616492376594",
+        "ordertype": "limit",
+        "pair": "XBTUSD",
+        "price": 37500,
+        "type": "buy",
+        "volume": 1.25,
+    }
+    encoded = (str(data["nonce"]) + urllib.parse.urlencode(data)).encode()
+    message = b"/0/private/AddOrder" + hashlib.sha256(encoded).digest()
+    got = base64.b64encode(hmac.new(base64.b64decode(secret), message, hashlib.sha512).digest()).decode()
+    return {"ok": got == expected, "expected": expected, "got": got}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Kraken private API readiness check. Never submits a live order.")
     ap.add_argument("--env-file", default=os.getenv("KRAKEN_ENV_FILE"))
