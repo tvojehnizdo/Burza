@@ -12,7 +12,14 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
-from alpha_discovery import AlphaRuntime, discover_models
+from alpha_discovery import (
+    AlphaRuntime,
+    discover_models,
+    ALPHA_COST_BPS,
+    EXECUTION_MODE,
+    VALIDATED_HORIZONS,
+    SHADOW_HORIZONS,
+)
 from microstructure import KrakenMicroRecorder
 
 KRAKEN = "https://api.kraken.com"
@@ -30,7 +37,8 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version="4.0")
+ENGINE_BUILD = "4.1-cost-aware"
+app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version=ENGINE_BUILD)
 RECORDER = KrakenMicroRecorder()
 ALPHA_RUNTIME = AlphaRuntime()
 AUTO_RECORD = os.getenv("AUTO_RECORD", "1").lower() in {"1","true","yes","on"}
@@ -608,8 +616,16 @@ async function go(u,m='GET'){o.textContent='Running...';try{let r=await fetch(u,
 @app.get("/api/health")
 def health():
     return {
-        "ok": True, "version": "4.0", "mode": "PAPER_RESEARCH",
-        "capital": START_CAPITAL, "live_orders": False
+        "ok": True,
+        "version": ENGINE_BUILD,
+        "build": ENGINE_BUILD,
+        "mode": "PAPER_RESEARCH",
+        "capital": START_CAPITAL,
+        "execution_mode": EXECUTION_MODE,
+        "alpha_cost_bps": ALPHA_COST_BPS,
+        "validated_horizons": list(VALIDATED_HORIZONS),
+        "shadow_horizons": list(SHADOW_HORIZONS),
+        "live_orders": False,
     }
 
 
@@ -636,10 +652,15 @@ def v4_stop():
 @app.get("/api/v4/status")
 def v4_status():
     return {
-        "version": "4.0",
+        "version": ENGINE_BUILD,
+        "build": ENGINE_BUILD,
         "recorder": RECORDER.status(),
         "alpha": ALPHA_RUNTIME.status(),
         "decision_interval_s": int(os.getenv("ALPHA_INTERVAL_S", "30")),
+        "execution_mode": EXECUTION_MODE,
+        "alpha_cost_bps": ALPHA_COST_BPS,
+        "validated_horizons": list(VALIDATED_HORIZONS),
+        "shadow_horizons": list(SHADOW_HORIZONS),
         "live_orders": False,
     }
 
