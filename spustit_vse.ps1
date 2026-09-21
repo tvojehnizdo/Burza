@@ -1,3 +1,7 @@
+param(
+    [switch]$ConsolidateUSDC
+)
+
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -346,6 +350,31 @@ while ($true) {
         }
         catch {
             Write-Host "Kraken inventory se nepodařilo vytvořit, readiness report zůstává platný." -ForegroundColor Yellow
+        }
+
+        if ($ConsolidateUSDC) {
+            Banner "KONSOLIDACE DO USDC" Yellow
+            Write-Host "Nejdřív zobrazím plán a validační AddOrder(validate=true)." -ForegroundColor Cyan
+            & $Python "consolidate_usdc.py"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Konsolidační plán/validace selhal."
+            }
+            Write-Host ""
+            Write-Host "Automaticky se provedou pouze přímé Pro prodeje do USDC, které splní Kraken minima." -ForegroundColor Yellow
+            Write-Host "BTC/ETH nebo jiné zbytky pod minimem zůstanou k ručnímu Convertu; nic se nebude obcházet." -ForegroundColor Yellow
+            $confirmConsolidate = Read-Host "Pro živou konsolidaci napiš přesně SJEDNOTIT USDC"
+            if ($confirmConsolidate -eq "SJEDNOTIT USDC") {
+                & $Python "consolidate_usdc.py" --execute --confirm SJEDNOTIT-USDC
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Živá konsolidace Pro-eligible části selhala."
+                }
+                try {
+                    & $Python "kraken_inventory.py"
+                } catch {}
+            }
+            else {
+                Write-Host "Živá konsolidace nebyla provedena." -ForegroundColor Yellow
+            }
         }
         break
     }
