@@ -131,7 +131,7 @@ def load_policy() -> dict[str, Any]:
         except Exception:
             pass
     p["live_execution"] = bool(p.get("live_execution", False))
-    p["max_order_notional_pct_equity"] = min(max(float(p.get("max_order_notional_pct_equity", 10.0)), 0.1), 25.0)
+    p["max_order_notional_pct_equity"] = min(max(float(p.get("max_order_notional_pct_equity", 10.0)), 0.1), 35.0)
     p["max_order_notional_usd"] = min(max(float(p.get("max_order_notional_usd", 15.0)), 1.0), 100.0)
     p["max_open_positions"] = min(max(int(p.get("max_open_positions", 2)), 1), 4)
     p["deadman_timeout_s"] = min(max(int(p.get("deadman_timeout_s", 60)), 20), 120)
