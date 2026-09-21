@@ -670,19 +670,24 @@ def run_forever() -> None:
 
             now = _now_ms()
             deadline = int(state.get("session_deadline_ts_ms") or 0)
-            if deadline and now >= deadline:
-                _save_state(state)
-                print("SESSION END: 60 minute limit reached. No new entries.")
-                return
+            entries = int(state.get("session_entry_count") or 0)
+            entry_window_open = (not deadline or now < deadline) and entries < SESSION_MAX_ENTRIES
 
-            entry = _session_auto_entry(client, state)
-            if entry.get("reason") == "SESSION_ENTRY_LIMIT_REACHED":
-                _save_state(state)
-                print("SESSION END: 10 entry limit reached. No new entries.")
-                return
+            if entry_window_open:
+                entry = _session_auto_entry(client, state)
+            else:
+                reason = "SESSION_TIME_LIMIT_REACHED" if deadline and now >= deadline else "SESSION_ENTRY_LIMIT_REACHED"
+                entry = {"ok": True, "reason": reason}
 
             snap = _portfolio_snapshot(client)
             _save_state(state)
+
+            if not entry_window_open and int(snap["open_position_count"]) == 0:
+                print(
+                    f"SESSION COMPLETE: {entry.get('reason')}; "
+                    "all positions are closed and protection cleanup is complete."
+                )
+                return
 
             remaining_sec = max(0, (deadline - now) // 1000) if deadline else 0
             print(
