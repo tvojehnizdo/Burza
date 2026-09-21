@@ -204,3 +204,6 @@ Run `start_v4_neutral.ps1` and inspect `/api/v4/relative-value`.
 Directional alpha remains PAPER-only and LIVE orders remain disabled.
 
 Automatically paper-executes qualifying PF/FF pairs; LIVE orders remain disabled.
+
+### V4.3 statistical RV V2
+Relative-value entries now require a rolling basis history and a >=2-sigma deviation after modeled fees, spread, adverse-selection buffer and short-horizon adverse funding. Uses a fresh V2 paper ledger.
