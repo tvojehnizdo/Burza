@@ -90,14 +90,34 @@ class KrakenFutures:
         r.raise_for_status()
         return r.json()
 
-    def send_order(self, symbol: str, side: str, size: float, order_type: str = "mkt", reduce_only: bool = False) -> dict[str, Any]:
-        return self.request("POST", "/api/v3/sendOrder", {
+    def send_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        order_type: str = "mkt",
+        reduce_only: bool = False,
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        trigger_signal: str | None = None,
+        cli_ord_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "orderType": order_type,
             "symbol": symbol,
             "side": side,
             "size": size,
             "reduceOnly": str(bool(reduce_only)).lower(),
-        })
+        }
+        if limit_price is not None:
+            payload["limitPrice"] = limit_price
+        if stop_price is not None:
+            payload["stopPrice"] = stop_price
+        if trigger_signal:
+            payload["triggerSignal"] = trigger_signal
+        if cli_ord_id:
+            payload["cliOrdId"] = cli_ord_id
+        return self.request("POST", "/api/v3/sendOrder", payload)
 
     def deadman(self, timeout_s: int) -> dict[str, Any]:
         return self.request("POST", "/api/v3/cancelallordersafter", {"timeout": int(timeout_s)})
@@ -331,7 +351,18 @@ def readiness() -> dict[str, Any]:
     }
 
 
-def place_order(symbol: str, side: str, size: float, reduce_only: bool = False) -> dict[str, Any]:
+def place_order(
+    symbol: str,
+    side: str,
+    size: float,
+    reduce_only: bool = False,
+    order_type: str = "mkt",
+    limit_price: float | None = None,
+    stop_price: float | None = None,
+    trigger_signal: str | None = None,
+    cli_ord_id: str | None = None,
+    use_deadman: bool = False,
+) -> dict[str, Any]:
     p = load_policy()
     if not p.get("live_execution"):
         return {
@@ -343,8 +374,19 @@ def place_order(symbol: str, side: str, size: float, reduce_only: bool = False) 
         }
     c = client_from_env()
     preflight = order_preflight(symbol, side, size, reduce_only=reduce_only, client=c)
-    c.deadman(int(p.get("deadman_timeout_s", 60)))
-    result = c.send_order(str(symbol).upper(), side, float(size), order_type="mkt", reduce_only=reduce_only)
+    if use_deadman:
+        c.deadman(int(p.get("deadman_timeout_s", 60)))
+    result = c.send_order(
+        str(symbol).upper(),
+        side,
+        float(size),
+        order_type=order_type,
+        reduce_only=reduce_only,
+        limit_price=limit_price,
+        stop_price=stop_price,
+        trigger_signal=trigger_signal,
+        cli_ord_id=cli_ord_id,
+    )
     return {"submitted_live": True, "preflight": preflight, "result": result}
 
 
