@@ -41,12 +41,13 @@ ROUND_TRIP_TAKER_COST_BPS = 2.0 * (
 )
 MIN_TAKER_NET_EDGE_BPS = 5.0
 BACKUP_TAKE_PROFIT_BPS = 300.0
-TARGET_NOTIONAL_USD = 2.25
-MAX_NOTIONAL_USD = 3.0
+HARD_STOP_BPS = 45.0
+TARGET_NOTIONAL_USD = 5.0
+MAX_NOTIONAL_USD = 5.0
 MAX_NOTIONAL_PCT_EQUITY = 35.0
 MAX_OPEN_POSITIONS = 4
-MAX_PORTFOLIO_NOTIONAL_USD = 10.0
-MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY = 50.0
+MAX_PORTFOLIO_NOTIONAL_USD = 20.0
+MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY = 95.0
 CHARTS = "https://futures.kraken.com/api/charts/v1"
 
 
@@ -421,11 +422,9 @@ def private_plan() -> dict[str, Any]:
             })
             continue
 
-        atr_frac = max(float(p.get("atr_pct") or 0.0) / 100.0, 0.0001)
-        expected_frac = max(float(p.get("expected_move_proxy_bps") or 0.0) / 10000.0, 0.0)
-        stop_frac = min(max(1.5 * atr_frac, 0.0035), 0.0080)
-        # A distant exchange-side TP is only a fail-safe. Normal profitable
-        # exits are managed by the tightening ratchet trailing logic.
+        stop_frac = HARD_STOP_BPS / 10000.0
+        # Fixed loss distance stays unchanged while the profit side is allowed
+        # to run under the ratcheting trailing manager.
         take_frac = BACKUP_TAKE_PROFIT_BPS / 10000.0
 
         if side == "buy":
@@ -485,6 +484,115 @@ def private_plan() -> dict[str, Any]:
         "actual_order_submitted": False,
     }
 
+
+
+def plan_specific_candidate(
+    symbol: str,
+    side: str,
+    source_signal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a read-only executable plan for a specific pair leg."""
+    symbol = str(symbol).upper()
+    side = str(side).lower()
+    if side not in {"buy", "sell"}:
+        return {"ready": False, "reason": "INVALID_SIDE", "actual_order_submitted": False}
+
+    save_policy({
+        "live_execution": False,
+        "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
+        "max_order_notional_usd": MAX_NOTIONAL_USD,
+        "max_open_positions": MAX_OPEN_POSITIONS,
+        "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
+        "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
+        "allowed_roots": ["*"],
+    })
+    r = readiness()
+    if not r.get("safe_to_arm"):
+        return {"ready": False, "reason": "FUTURES_ACCOUNT_NOT_READY", "readiness": r, "actual_order_submitted": False}
+    if int(r.get("open_position_count") or 0) >= MAX_OPEN_POSITIONS:
+        return {"ready": False, "reason": "POSITION_SLOTS_FULL", "readiness": r, "actual_order_submitted": False}
+
+    equity = float(r.get("equity_usd") or 0.0)
+    if equity <= 0:
+        return {"ready": False, "reason": "NO_FUTURES_EQUITY", "readiness": r, "actual_order_submitted": False}
+
+    client = client_from_env()
+    open_symbols = set(position_map(client.open_positions()).keys())
+    order_symbols = _symbols_in_open_orders(r.get("open_orders") or {})
+    blocked_symbols = open_symbols | (order_symbols - open_symbols)
+    if symbol in blocked_symbols:
+        return {
+            "ready": False,
+            "reason": "SYMBOL_ALREADY_OPEN_OR_BLOCKED",
+            "symbol": symbol,
+            "readiness": r,
+            "actual_order_submitted": False,
+        }
+
+    px = _ticker_mid(client, symbol)
+    csize = contract_size(symbol)
+    minimum = min_lot(symbol)
+    minimum_notional = minimum * px * csize
+    desired_notional = min(MAX_NOTIONAL_USD, max(TARGET_NOTIONAL_USD, minimum_notional))
+    raw_size = desired_notional / (px * csize)
+    size = round_size_down(symbol, raw_size)
+    if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
+        size = minimum
+    if size < minimum:
+        return {
+            "ready": False,
+            "reason": "BELOW_MIN_LOT_AFTER_CAP",
+            "symbol": symbol,
+            "price": px,
+            "min_lot": minimum,
+            "minimum_lot_notional_usd": minimum_notional,
+            "actual_order_submitted": False,
+        }
+
+    try:
+        pre = order_preflight(symbol, side, size, reduce_only=False, client=client)
+    except Exception as exc:
+        return {
+            "ready": False,
+            "reason": "PREFLIGHT_REJECTED",
+            "symbol": symbol,
+            "error": f"{type(exc).__name__}: {exc}",
+            "actual_order_submitted": False,
+        }
+
+    stop_frac = HARD_STOP_BPS / 10000.0
+    take_frac = BACKUP_TAKE_PROFIT_BPS / 10000.0
+    if side == "buy":
+        stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
+        take_price = round_price_to_tick(symbol, px * (1.0 + take_frac), mode="up")
+    else:
+        stop_price = round_price_to_tick(symbol, px * (1.0 + stop_frac), mode="up")
+        take_price = round_price_to_tick(symbol, px * (1.0 - take_frac), mode="down")
+
+    candidate = {
+        "symbol": symbol,
+        "side": side,
+        "size": size,
+        "mid_price": px,
+        "estimated_notional_usd": size * px * csize,
+        "equity_usd": equity,
+        "notional_cap_usd": min(MAX_NOTIONAL_USD, equity * MAX_NOTIONAL_PCT_EQUITY / 100.0),
+        "stop_price": stop_price,
+        "take_profit_price": take_price,
+        "stop_distance_pct": stop_frac * 100.0,
+        "take_profit_distance_pct": take_frac * 100.0,
+        "taker_net_edge_bps": float((source_signal or {}).get("score") or 0.0),
+        "confidence": None,
+        "source_signal": source_signal or {"mode": "specific_pair_leg"},
+        "preflight": pre,
+    }
+    return {
+        "ready": True,
+        "reason": "FUTURES_SPECIFIC_EXECUTABLE",
+        "candidate": candidate,
+        "readiness": r,
+        "actual_order_submitted": False,
+    }
 
 def _exit_limit_price(symbol: str, exit_side: str, trigger_price: float) -> float:
     # Kraken Futures stop/take-profit examples use both stopPrice and limitPrice.
@@ -591,9 +699,8 @@ def rescue_existing_position() -> dict[str, Any]:
         save_policy({"live_execution": False})
 
 
-def execute() -> dict[str, Any]:
-    # Keep policy disarmed during planning. It is armed only for the few calls
-    # needed to establish the canary and protective reduce-only orders.
+
+def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     save_policy({
         "live_execution": False,
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
@@ -604,16 +711,9 @@ def execute() -> dict[str, Any]:
         "allowed_roots": ["*"],
     })
 
-    plan = private_plan()
-    if not plan.get("ready"):
-        return {
-            **plan,
-            "actual_order_submitted": False,
-        }
-
-    candidate = dict(plan["candidate"])
-    symbol = candidate["symbol"]
-    side = candidate["side"]
+    candidate = dict(candidate)
+    symbol = str(candidate["symbol"]).upper()
+    side = str(candidate["side"]).lower()
     size = float(candidate["size"])
     exit_side = "sell" if side == "buy" else "buy"
     client = client_from_env()
@@ -624,12 +724,13 @@ def execute() -> dict[str, Any]:
     compensation: dict[str, Any] | None = None
 
     try:
-        # Deactivate any stale dead-man timer so it cannot later cancel the
-        # protective orders we are about to place.
         try:
             client.deadman(0)
         except Exception:
             pass
+
+        # Re-run account-level preflight immediately before the live send.
+        order_preflight(symbol, side, size, reduce_only=False, client=client)
 
         save_policy({"live_execution": True})
         entry = place_order(
@@ -641,7 +742,6 @@ def execute() -> dict[str, Any]:
             cli_ord_id=f"ce{int(time.time() * 1000)}",
             use_deadman=False,
         )
-
         if not entry.get("submitted_live"):
             raise RuntimeError(f"Entry not submitted: {entry}")
 
@@ -660,11 +760,7 @@ def execute() -> dict[str, Any]:
 
         stop_trigger = float(candidate["stop_price"])
         stop = place_order(
-            symbol,
-            exit_side,
-            protected_size,
-            reduce_only=True,
-            order_type="stp",
+            symbol, exit_side, protected_size, reduce_only=True, order_type="stp",
             stop_price=stop_trigger,
             limit_price=_exit_limit_price(symbol, exit_side, stop_trigger),
             trigger_signal="mark",
@@ -676,11 +772,7 @@ def execute() -> dict[str, Any]:
 
         take_trigger = float(candidate["take_profit_price"])
         take = place_order(
-            symbol,
-            exit_side,
-            protected_size,
-            reduce_only=True,
-            order_type="take_profit",
+            symbol, exit_side, protected_size, reduce_only=True, order_type="take_profit",
             stop_price=take_trigger,
             limit_price=_exit_limit_price(symbol, exit_side, take_trigger),
             trigger_signal="mark",
@@ -703,10 +795,10 @@ def execute() -> dict[str, Any]:
         return result
 
     except Exception as exc:
-        # If any protection step fails after an entry, flatten immediately.
         try:
             try:
-                client.cancel_all_orders()
+                from futures_private import cancel_symbol_orders
+                cancel_symbol_orders(client, symbol, reduce_only_only=True)
             except Exception:
                 pass
             visible = _position_size(client, symbol)
@@ -741,6 +833,12 @@ def execute() -> dict[str, Any]:
     finally:
         save_policy({"live_execution": False})
 
+
+def execute() -> dict[str, Any]:
+    plan = private_plan()
+    if not plan.get("ready"):
+        return {**plan, "actual_order_submitted": False}
+    return execute_candidate(dict(plan["candidate"]))
 
 def live_status() -> dict[str, Any]:
     client = client_from_env()
