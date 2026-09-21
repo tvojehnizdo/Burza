@@ -229,3 +229,6 @@ Status reporting now shows private Kraken account capital separately from PAPER 
 
 ### Sequential hunter validation
 The neutral profile now records a 12-pair spot microstructure universe and runs one SHADOW trade at a time using only cost-positive candidates, plus one sequential futures-maker economic proxy trade at a time. Both lanes remain PAPER/SHADOW only.
+
+### Executable candidate validation
+Dashboard exposes a read-only executable-candidate gate that requires a current cost-positive state, Kraken pair minimums, and sufficient USD/USDC balance. It never submits an order.
