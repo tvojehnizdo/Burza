@@ -36,17 +36,19 @@ class KrakenFutures:
         mac = hmac.new(base64.b64decode(self.secret), digest, hashlib.sha512).digest()
         return base64.b64encode(mac).decode()
 
-    def request(self, method: str, endpoint_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request_url(self, method: str, url_path: str, auth_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = dict(params or {})
         nonce = str(int(time.time() * 1000))
         post_data = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         headers = {
             "APIKey": self.key,
-            "Authent": self._auth(post_data, nonce, endpoint_path),
+            "apikey": self.key,
+            "Authent": self._auth(post_data, nonce, auth_path),
+            "authent": self._auth(post_data, nonce, auth_path),
             "Nonce": nonce,
             "Accept": "application/json",
         }
-        url = BASE + "/derivatives" + endpoint_path
+        url = BASE + url_path
         if method.upper() == "GET":
             r = self.s.get(url, params=params, headers=headers, timeout=20)
         else:
@@ -56,6 +58,13 @@ class KrakenFutures:
         if body.get("result") == "error":
             raise RuntimeError(str(body.get("error") or body.get("errors") or body))
         return body
+
+    def request(self, method: str, endpoint_path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._request_url(method, "/derivatives" + endpoint_path, endpoint_path, params)
+
+    def check_key(self) -> dict[str, Any]:
+        path = "/api/auth/v1/api-keys/v3/check"
+        return self._request_url("GET", path, path, {})
 
     def accounts(self) -> dict[str, Any]:
         return self.request("GET", "/api/v3/accounts")
@@ -103,10 +112,21 @@ def client_from_env() -> KrakenFutures:
 
 def readiness() -> dict[str, Any]:
     c = client_from_env()
+    key_info = c.check_key()
+    perms = key_info.get("permissions") or {}
+    general = str(perms.get("general") or "").upper()
+    transfer = str(perms.get("transfer") or "").upper()
+    safe = general == "FULL_ACCESS" and transfer == "NO_ACCESS"
+
     accounts = c.accounts()
     positions = c.open_positions()
     return {
         "ok": True,
+        "safe_to_arm": safe,
+        "key_permissions": {
+            "general": general,
+            "transfer": transfer,
+        },
         "accounts": accounts,
         "open_positions": positions,
         "live_execution": bool(load_policy().get("live_execution")),
