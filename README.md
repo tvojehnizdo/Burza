@@ -220,3 +220,6 @@ This marker exists to run full CI against the final hardened canary implementati
 
 ### RV V2 canonical DB validation
 All Relative Value PAPER, status, readiness and live-canary processes are pinned to data/relative_value_v2.db unless RV_DB is explicitly overridden.
+
+### Robust RV history validation
+RV entry statistics now use time-decimated, spread-quality-filtered history and robust median/MAD z-scores so stale or wide fixed-future quotes cannot dominate the baseline.
