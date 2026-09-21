@@ -37,7 +37,7 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-ENGINE_BUILD = "4.1-cost-aware"
+ENGINE_BUILD = "4.2-futures-maker-proxy"
 app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version=ENGINE_BUILD)
 RECORDER = KrakenMicroRecorder()
 ALPHA_RUNTIME = AlphaRuntime()
