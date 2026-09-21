@@ -27,6 +27,7 @@ AUTO_INTERVAL = int(os.getenv("SUPERVISOR_INTERVAL_S", "300"))
 AUTO = os.getenv("SUPERVISOR_AUTO", "0").lower() in {"1", "true", "yes", "on"}
 CONTROL = os.getenv("SUPERVISOR_CONTROL", "1").lower() in {"1", "true", "yes", "on"}
 LOG_PATH = Path(os.getenv("SUPERVISOR_LOG", "reports/ai-supervisor.jsonl"))
+EXPECTED_V4_BUILD = "4.1-cost-aware"
 
 app = FastAPI(title="IMPULSE AI Supervisor", version="1.0")
 
@@ -58,6 +59,18 @@ def system_context() -> dict[str, Any]:
             ctx[name] = _get(path)
         except Exception as exc:
             ctx[name] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    v4_status = ctx.get("v4_status") if isinstance(ctx.get("v4_status"), dict) else {}
+    actual_build = v4_status.get("build") or v4_status.get("version")
+    ctx["runtime_guard"] = {
+        "expected_build": EXPECTED_V4_BUILD,
+        "actual_build": actual_build,
+        "stale_runtime": actual_build != EXPECTED_V4_BUILD,
+        "required_action": (
+            "Restart the V4 Python process from the current main branch before judging model quality."
+            if actual_build != EXPECTED_V4_BUILD else "none"
+        ),
+    }
 
     try:
         ctx["kraken_account"] = account_snapshot()
@@ -117,6 +130,8 @@ Hard rules:
 - Trading entries/exits are owned by the deterministic Pulse Engine, not by you.
 - If evidence is weak, prefer no change.
 - Do not infer profitability from tiny samples.
+- Check runtime_guard first. If stale_runtime=true, explicitly flag the stale
+  V4 process and do not treat old horizons/cost settings as the current model.
 - Respond with JSON only.
 
 Allowed actions:
