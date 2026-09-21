@@ -11,11 +11,13 @@ from futures_autopilot import (
     MAX_SESSION_DRAWDOWN_PCT,
     SESSION_CAPITAL_USD,
     _acquire_pid_lock,
+    _close_position,
     _drawdown_guard,
     _load_state,
     _log,
     _manage_positions,
     _portfolio_snapshot,
+    _position_rows_map,
     _release_pid_lock,
     _save_state,
 )
@@ -25,8 +27,12 @@ from futures_canary import (
     MAX_PORTFOLIO_NOTIONAL_USD,
     MAX_NOTIONAL_USD,
     execute,
+    execute_candidate,
+    plan_specific_candidate,
     private_plan,
+    public_scan,
 )
+from futures_pairs import scan_pairs
 from futures_private import save_policy
 
 SESSION_DURATION_SEC = 60 * 60
@@ -47,18 +53,107 @@ def _entry_allowed(now_ms: int, state: dict[str, Any]) -> tuple[bool, str]:
     return True, "ENTRY_WINDOW_OPEN"
 
 
+PAIR_SCAN_INTERVAL_SEC = 60
+
+
+def _rollback_pair_leg(client: Any, state: dict[str, Any], symbol: str, reason: str) -> dict[str, Any]:
+    row = _position_rows_map(client.open_positions()).get(symbol.upper())
+    if row is None:
+        return {"ok": True, "reason": "PAIR_ROLLBACK_NOT_NEEDED", "symbol": symbol}
+    return _close_position(client, state, row, reason, 0.0)
+
+
+def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
+    now_ms = int(time.time() * 1000)
+    if int(state.get("session_entry_count") or 0) > SESSION_MAX_ENTRIES - 2:
+        return {"ok": True, "reason": "PAIR_ENTRY_BUDGET_FULL"}
+
+    from futures_private import client_from_env
+    client = client_from_env()
+    snap = _portfolio_snapshot(client)
+    if int(snap.get("open_position_count") or 0) > MAX_OPEN_POSITIONS - 2:
+        return {"ok": True, "reason": "PAIR_NEEDS_TWO_FREE_SLOTS"}
+
+    last_pair_scan = int(state.get("last_pair_scan_ts_ms") or 0)
+    if now_ms - last_pair_scan < PAIR_SCAN_INTERVAL_SEC * 1000:
+        return {"ok": True, "reason": "PAIR_SCAN_COOLDOWN"}
+    state["last_pair_scan_ts_ms"] = now_ms
+
+    scan = public_scan()
+    symbols = [str(x).upper() for x in scan.get("symbols", []) if x]
+    if len(symbols) < 2:
+        return {"ok": True, "reason": "PAIR_UNIVERSE_TOO_SMALL"}
+
+    pairs = scan_pairs(symbols)
+    for pair in pairs.get("top", []):
+        long_symbol = str(pair.get("long_symbol") or "").upper()
+        short_symbol = str(pair.get("short_symbol") or "").upper()
+        if not long_symbol or not short_symbol or long_symbol == short_symbol:
+            continue
+
+        long_plan = plan_specific_candidate(long_symbol, "buy", pair)
+        short_plan = plan_specific_candidate(short_symbol, "sell", pair)
+        if not long_plan.get("ready") or not short_plan.get("ready"):
+            continue
+
+        first = execute_candidate(dict(long_plan["candidate"]))
+        if not (first.get("ok") and first.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"):
+            continue
+
+        _manage_positions(client, state)
+
+        # Re-plan the second leg against the account after leg 1 is genuinely open.
+        short_plan = plan_specific_candidate(short_symbol, "sell", pair)
+        if not short_plan.get("ready"):
+            rollback = _rollback_pair_leg(client, state, long_symbol, "PAIR_SECOND_LEG_NOT_READY")
+            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "rollback": rollback})
+            return {"ok": False, "reason": "PAIR_SECOND_LEG_NOT_READY", "pair": pair}
+
+        second = execute_candidate(dict(short_plan["candidate"]))
+        if not (second.get("ok") and second.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"):
+            rollback = _rollback_pair_leg(client, state, long_symbol, "PAIR_SECOND_LEG_FAILED")
+            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "second": second, "rollback": rollback})
+            return {"ok": False, "reason": "PAIR_SECOND_LEG_FAILED", "pair": pair}
+
+        _manage_positions(client, state)
+        state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 2
+        state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 2
+        _log({
+            "event": "BOUNDED_SESSION_PAIR_ENTRY",
+            "pair": pair,
+            "long_result": first,
+            "short_result": second,
+            "session_entry_count": state["session_entry_count"],
+        })
+        return {
+            "ok": True,
+            "reason": "PAIR_AUTO_ENTRY_OPENED",
+            "long_symbol": long_symbol,
+            "short_symbol": short_symbol,
+            "pair_mode": pair.get("mode"),
+            "session_entry_count": state["session_entry_count"],
+        }
+
+    return {"ok": True, "reason": "NO_EXECUTABLE_PAIR"}
+
+
 def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     allowed, reason = _entry_allowed(now_ms, state)
     if not allowed:
         return {"ok": True, "reason": reason}
 
+    pair_result = _try_pair_entry(state)
+    if pair_result.get("reason") == "PAIR_AUTO_ENTRY_OPENED":
+        return pair_result
+
     plan = private_plan()
     if not plan.get("ready"):
         return {
             "ok": True,
-            "reason": str(plan.get("reason") or "NO_ENTRY"),
+            "reason": str(plan.get("reason") or pair_result.get("reason") or "NO_ENTRY"),
             "candidate": (plan.get("public_scan") or {}).get("candidate"),
+            "pair_reason": pair_result.get("reason"),
         }
 
     result = execute()
@@ -71,6 +166,7 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
             "symbol": symbol,
             "session_entry_count": state["session_entry_count"],
             "result": result,
+            "pair_reason": pair_result.get("reason"),
         })
         return {
             "ok": True,
@@ -82,7 +178,7 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     if result.get("reason") == "FUTURES_CANARY_ABORTED":
         state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
 
-    _log({"event": "BOUNDED_SESSION_ENTRY_NOT_OPENED", "result": result})
+    _log({"event": "BOUNDED_SESSION_ENTRY_NOT_OPENED", "result": result, "pair_reason": pair_result.get("reason")})
     return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
 
 
