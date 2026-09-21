@@ -331,6 +331,11 @@ def min_lot(symbol: str) -> float:
     return float(instrument_spec(symbol)["qty_step"])
 
 
+def contract_size(symbol: str) -> float:
+    value = float(instrument_spec(symbol).get("contract_size") or 1.0)
+    return value if value > 0 else 1.0
+
+
 def tick_size(symbol: str) -> float:
     tick = float(instrument_spec(symbol).get("tick_size") or 0.0)
     if tick <= 0:
@@ -395,7 +400,7 @@ def order_preflight(symbol: str, side: str, size: float, reduce_only: bool = Fal
     px = _mid_price(tickers.get(s))
     if px is None:
         raise RuntimeError(f"No usable live ticker for {s}")
-    notional = float(size) * px
+    notional = float(size) * px * contract_size(s)
 
     accounts = c.accounts()
     equity = _flex_equity_usd(accounts)
