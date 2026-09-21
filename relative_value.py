@@ -21,14 +21,18 @@ MIN_NET_EDGE_BPS = float(os.getenv("RV_MIN_NET_EDGE_BPS", "8"))
 MIN_DAYS_TO_EXPIRY = float(os.getenv("RV_MIN_DAYS_TO_EXPIRY", "0.5"))
 MAX_DAYS_TO_EXPIRY = float(os.getenv("RV_MAX_DAYS_TO_EXPIRY", "220"))
 HISTORY_WINDOW = int(os.getenv("RV_HISTORY_WINDOW", "500"))
+MIN_HISTORY = int(os.getenv("RV_MIN_HISTORY", "60"))
+ENTRY_Z = float(os.getenv("RV_ENTRY_Z", "2.0"))
+EXIT_Z = float(os.getenv("RV_EXIT_Z", "0.5"))
+STOP_Z = float(os.getenv("RV_STOP_Z", "3.5"))
 
 PAPER_ENABLED = os.getenv("RV_PAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 PAPER_START_EQUITY = float(os.getenv("RV_PAPER_START_EQUITY", os.getenv("START_CAPITAL", "5000")))
 PAPER_ALLOC_PCT = float(os.getenv("RV_PAPER_ALLOC_PCT", "15")) / 100.0
 PAPER_MAX_OPEN = int(os.getenv("RV_PAPER_MAX_OPEN", "2"))
 PAPER_TAKE_BPS = float(os.getenv("RV_PAPER_TAKE_BPS", "6"))
-PAPER_STOP_BPS = float(os.getenv("RV_PAPER_STOP_BPS", "25"))
-PAPER_MAX_HOLD_H = float(os.getenv("RV_PAPER_MAX_HOLD_H", "24"))
+PAPER_STOP_BPS = float(os.getenv("RV_PAPER_STOP_BPS", "60"))
+PAPER_MAX_HOLD_H = float(os.getenv("RV_PAPER_MAX_HOLD_H", "6"))
 PAPER_REENTRY_COOLDOWN_S = float(os.getenv("RV_PAPER_REENTRY_COOLDOWN_S", "300"))
 
 SESSION = requests.Session()
@@ -192,34 +196,41 @@ def paper_equity(path: Path = DB_PATH) -> float:
     return _meta_get("paper_equity", PAPER_START_EQUITY, path)
 
 
-def _history_zscore(perp: str, fixed: str, current: float, path: Path = DB_PATH) -> tuple[float | None, int]:
+def _history_stats(perp: str, fixed: str, current_mid_basis: float, path: Path = DB_PATH) -> dict[str, Any]:
     init_db(path)
     with sqlite3.connect(path) as con:
         rows = con.execute(
-            """SELECT executable_basis_bps
+            """SELECT mid_basis_bps
                FROM rv_snapshots
                WHERE perp_symbol=? AND fixed_symbol=?
                ORDER BY id DESC LIMIT ?""",
             (perp, fixed, HISTORY_WINDOW),
         ).fetchall()
     vals = [float(r[0]) for r in rows if r[0] is not None]
-    if len(vals) < 30:
-        return None, len(vals)
-    mean = sum(vals) / len(vals)
-    var = sum((x - mean) ** 2 for x in vals) / max(len(vals) - 1, 1)
+    n = len(vals)
+    if n < 2:
+        return {"n": n, "mean": None, "sd": None, "z": None, "deviation_bps": None}
+    mean = sum(vals) / n
+    var = sum((x - mean) ** 2 for x in vals) / max(n - 1, 1)
     sd = math.sqrt(var)
-    return ((current - mean) / sd if sd > 1e-9 else 0.0), len(vals)
+    deviation = current_mid_basis - mean
+    z = deviation / sd if sd > 1e-9 else 0.0
+    return {"n": n, "mean": mean, "sd": sd, "z": z, "deviation_bps": deviation}
 
 
 def _funding_bps_per_hour(ticker: dict[str, Any]) -> tuple[float | None, float | None]:
     raw = _f(ticker.get("fundingRate"))
     if raw is None:
         raw = _f(ticker.get("fundingRatePrediction"))
-    # Kraken relative funding is an hourly decimal rate. Guard against an
-    # absolute USD funding value or malformed payload by refusing large values.
-    if raw is None or abs(raw) > 0.01:
+    if raw is None:
+        return None, None
+    # Kraken ticker fundingRate is the absolute hourly funding amount per
+    # contract unit. Convert it to a relative rate using the underlying/index
+    # price so it can be compared with basis in bps.
+    ref = _f(ticker.get("indexPrice")) or _mid(ticker)
+    if ref is None or ref <= 0:
         return raw, None
-    return raw, raw * 10000.0
+    return raw, (raw / ref) * 10000.0
 
 
 def scan_opportunities(
@@ -283,27 +294,47 @@ def scan_opportunities(
         if min(pb, pa, fb, fa, pm, fm) <= 0:
             continue
 
-        # Conservative immediate hedge economics using executable sides.
-        rich_fixed = (fb / pa - 1.0) * 10000.0  # long perp ask, short fixed bid
-        cheap_fixed = (pb / fa - 1.0) * 10000.0  # short perp bid, long fixed ask
-        if rich_fixed >= cheap_fixed:
+        # One scalar basis series (fixed vs perpetual) is used for statistical
+        # relative-value discovery. We trade deviations from its own history,
+        # not the absolute carry to expiry.
+        mid_basis = (fm / pm - 1.0) * 10000.0
+        stats = _history_stats(perp_symbol, fixed_symbol, mid_basis, db_path)
+        z = stats["z"]
+        n_hist = int(stats["n"])
+        mean_basis = stats["mean"]
+        deviation_bps = stats["deviation_bps"]
+
+        if deviation_bps is not None and deviation_bps >= 0:
             direction = "LONG_PERP_SHORT_FIXED"
-            executable = rich_fixed
+            executable = (fb / pa - 1.0) * 10000.0
         else:
             direction = "SHORT_PERP_LONG_FIXED"
-            executable = cheap_fixed
+            executable = (pb / fa - 1.0) * 10000.0
 
-        mid_basis = (fm / pm - 1.0) * 10000.0
-        net_proxy = executable - fee_floor - ADVERSE_BUFFER_BPS
+        perp_spread_bps = ((pa - pb) / pm) * 10000.0
+        fixed_spread_bps = ((fa - fb) / fm) * 10000.0
+        spread_roundtrip_bps = max(perp_spread_bps, 0.0) + max(fixed_spread_bps, 0.0)
+
         funding_raw, funding_bph = _funding_bps_per_hour(pt)
         funding_effect = None
         if funding_bph is not None:
-            # Positive funding: longs pay shorts.
+            # Positive relative funding means perp longs pay shorts.
             funding_effect = -funding_bph if direction.startswith("LONG_PERP") else funding_bph
 
-        z, n_hist = _history_zscore(perp_symbol, fixed_symbol, executable, db_path)
+        adverse_funding_bps = 0.0
+        if funding_effect is not None and funding_effect < 0:
+            adverse_funding_bps = abs(funding_effect) * PAPER_MAX_HOLD_H
+
+        deviation_abs = abs(float(deviation_bps or 0.0))
+        total_friction_bps = fee_floor + ADVERSE_BUFFER_BPS + spread_roundtrip_bps + adverse_funding_bps
+        net_proxy = deviation_abs - total_friction_bps
         annualized_basis_pct = (mid_basis / 100.0) * (365.0 / days) if days > 0 else None
-        eligible = bool(net_proxy >= MIN_NET_EDGE_BPS)
+        eligible = bool(
+            n_hist >= MIN_HISTORY
+            and z is not None
+            and abs(float(z)) >= ENTRY_Z
+            and net_proxy >= MIN_NET_EDGE_BPS
+        )
 
         item = {
             "root": root,
@@ -317,16 +348,23 @@ def scan_opportunities(
             "fixed_bid": fb,
             "fixed_ask": fa,
             "mid_basis_bps": round(mid_basis, 4),
+            "historical_mean_basis_bps": round(float(mean_basis), 4) if mean_basis is not None else None,
+            "basis_deviation_bps": round(float(deviation_bps), 4) if deviation_bps is not None else None,
             "executable_basis_bps": round(executable, 4),
             "annualized_mid_basis_pct": round(annualized_basis_pct, 3) if annualized_basis_pct is not None else None,
             "maker_fee_floor_bps": round(fee_floor, 4),
+            "spread_roundtrip_bps": round(spread_roundtrip_bps, 4),
             "adverse_buffer_bps": round(ADVERSE_BUFFER_BPS, 4),
+            "adverse_funding_bps_max_hold": round(adverse_funding_bps, 4),
+            "total_friction_bps": round(total_friction_bps, 4),
             "net_basis_proxy_bps": round(net_proxy, 4),
             "funding_rate_raw": funding_raw,
             "funding_bps_per_hour": round(funding_bph, 6) if funding_bph is not None else None,
             "funding_effect_bps_1h_for_direction": round(funding_effect, 6) if funding_effect is not None else None,
             "history_n": n_hist,
-            "zscore": round(z, 3) if z is not None else None,
+            "min_history": MIN_HISTORY,
+            "entry_z_threshold": ENTRY_Z,
+            "zscore": round(float(z), 3) if z is not None else None,
             "eligible": eligible,
             "research_only": True,
             "live_orders": False,
@@ -375,6 +413,10 @@ def scan_opportunities(
         "pair_roundtrip_fee_floor_bps": fee_floor,
         "adverse_buffer_bps": ADVERSE_BUFFER_BPS,
         "min_net_edge_bps": MIN_NET_EDGE_BPS,
+        "min_history": MIN_HISTORY,
+        "entry_z": ENTRY_Z,
+        "exit_z": EXIT_Z,
+        "stop_z": STOP_Z,
         "best": rows[:10],
         "eligible": [x for x in rows if x["eligible"]][:20],
         "all": rows,
@@ -463,10 +505,24 @@ def resolve_paper_pairs(scan: dict[str, Any], path: Path = DB_PATH) -> list[dict
                 continue
             mark = _paper_mark(r[:7], quote, now)
             reason = None
-            if float(mark["net_pnl_bps"]) >= PAPER_TAKE_BPS:
-                reason = "TAKE_CONVERGENCE"
-            elif float(mark["net_pnl_bps"]) <= -PAPER_STOP_BPS:
-                reason = "STOP_DIVERGENCE"
+            current_z = quote.get("zscore")
+            net_pnl_bps = float(mark["net_pnl_bps"])
+            if net_pnl_bps >= PAPER_TAKE_BPS:
+                reason = "TAKE_PNL"
+            elif (
+                current_z is not None
+                and abs(float(current_z)) <= EXIT_Z
+                and net_pnl_bps > 0
+            ):
+                reason = "TAKE_MEAN_REVERSION"
+            elif (
+                current_z is not None
+                and abs(float(current_z)) >= STOP_Z
+                and net_pnl_bps < 0
+            ):
+                reason = "STOP_Z_DIVERGENCE"
+            elif net_pnl_bps <= -PAPER_STOP_BPS:
+                reason = "STOP_PNL"
             elif float(mark["hours"]) >= PAPER_MAX_HOLD_H:
                 reason = "MAX_HOLD"
             if reason is None:
@@ -636,6 +692,10 @@ def paper_status(scan: dict[str, Any] | None = None, path: Path = DB_PATH) -> di
         "alloc_pct_per_leg": round(PAPER_ALLOC_PCT * 100.0, 2),
         "take_bps": PAPER_TAKE_BPS,
         "stop_bps": PAPER_STOP_BPS,
+        "entry_z": ENTRY_Z,
+        "exit_z": EXIT_Z,
+        "stop_z": STOP_Z,
+        "min_history": MIN_HISTORY,
         "max_hold_h": PAPER_MAX_HOLD_H,
         "open": open_marks,
         "recent": recent,
@@ -721,6 +781,25 @@ def selftest() -> dict[str, Any]:
             test_db.unlink()
         except Exception:
             pass
+    init_db(test_db)
+    with sqlite3.connect(test_db) as con:
+        for i in range(MIN_HISTORY):
+            con.execute(
+                """INSERT INTO rv_snapshots(
+                    ts_ms,root,perp_symbol,fixed_symbol,expiry,days_to_expiry,direction,
+                    perp_bid,perp_ask,fixed_bid,fixed_ask,mid_basis_bps,executable_basis_bps,
+                    fee_floor_bps,adverse_buffer_bps,net_basis_proxy_bps,
+                    funding_rate_raw,funding_bps_per_hour,zscore,eligible
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    now_ms() - (MIN_HISTORY - i) * 10000,
+                    "XBTUSD", "PF_XBTUSD", ff, future_date.isoformat(), 90.0,
+                    "LONG_PERP_SHORT_FIXED", 100.0, 100.1, 100.35, 100.45,
+                    30.0 + (i % 3) * 0.2, 20.0, 8.0, 4.0, 5.0,
+                    0.001, 0.1, 0.0, 0,
+                ),
+            )
+    tickers[ff] = {"symbol": ff, "bid": 101.0, "ask": 101.05}
     r = scan_opportunities(instruments, tickers, test_db, persist=True)
     opened = maybe_open_paper_pairs(r, test_db)
     ps = paper_status(r, test_db)
