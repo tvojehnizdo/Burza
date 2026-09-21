@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install -r requirements.txt
-      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py ai_supervisor.py live_bridge.py
+      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py kraken_inventory.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py ai_supervisor.py live_bridge.py
       - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python v4_smoke.py | tee v4-smoke.json
       - run: python -c "import kraken_private, json; r=kraken_private.signature_selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
