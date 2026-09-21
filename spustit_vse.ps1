@@ -338,6 +338,9 @@ while ($true) {
         Write-Host "actual_order_submitted: false" -ForegroundColor Green
         Write-Host ("non-zero balances: " + (($r.balance_nonzero.PSObject.Properties.Name) -join ", "))
         Write-Host ("open orders: " + $r.open_orders_count + " | open positions: " + $r.open_positions_count)
+        Write-Host ""
+        Write-Host "Kapitál / marže dostupná systému:" -ForegroundColor Cyan
+        & $Python "capital_sources.py" --report $ReadinessJson
         break
     }
 
