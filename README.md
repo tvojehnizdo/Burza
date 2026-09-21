@@ -244,3 +244,6 @@ Validates the final dynamic PF_*USD live implementation with Kraken contract siz
 
 ### Four-slot micro futures portfolio validation
 Validates the four-slot micro futures portfolio, total exposure cap, dynamic PF_*USD universe, faster protected profit targets, stale-order symbol blocking, and the per-entry-confirmation launcher.
+
+### Futures live manager validation v2
+Validates compile plus pure exit-rule selftests for quick-profit, small-profit, no-progress, and hard-max-hold behavior. New live entries remain confirmation-gated.
