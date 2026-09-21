@@ -38,7 +38,7 @@ The local database is data/pulse_v4.db.
 
 ## Full-history mode
 
-Kraken publishes complete OHLCVT history through 2026-06-30. The archive is multi-part and large. The full launcher checks for at least 35 GB of free disk, starts the official Kraken archive download in a second PowerShell window, verifies the assembled SHA-256, extracts it, and then runs 5m/15m/60m train-validation-holdout research:
+Kraken publishes complete OHLCVT history through 2026-06-30. The archive is multi-part and large. The full launcher checks for at least 45 GB of free disk, starts the official Kraken archive download in a second PowerShell window, verifies the assembled SHA-256, extracts it, and then runs 5m/15m/60m train-validation-holdout research:
 
     cd C:\Burza
     git pull
