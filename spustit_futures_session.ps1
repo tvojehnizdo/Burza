@@ -31,9 +31,10 @@ try {
     Write-Host "FUTURES BOUNDED LIVE SESSION" -ForegroundColor Cyan
     Write-Host "Spusteni tohoto skriptu = schvaleni cele relace." -ForegroundColor Yellow
     Write-Host "60 min | max 10 novych vstupu | max 4 soucasne pozice." -ForegroundColor Yellow
-    Write-Host "Max 3 USD/obchod | portfolio max 10 USD | kapitalovy ramec max 22 USD." -ForegroundColor Yellow
+    Write-Host "Cil/max 5 USD/obchod | max 4 pozice | portfolio max 20 USD / 95 % equity." -ForegroundColor Yellow
     Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
-    Write-Host "Quick profit + no-progress 3 min + hard exit 8 min + cleanup automaticky." -ForegroundColor Yellow
+    Write-Host "TOP-20 volatilita + protismerne/relative-value pary + no-progress 3 min + hard exit 8 min." -ForegroundColor Yellow
+    Write-Host "STOP ~45 bps | backup TP 300 bps | trailing ratchet 45+ bps, utahovani az na 6 bps." -ForegroundColor Yellow
     Write-Host ""
 
     & $Python "futures_session.py" --run --confirm RUN-BOUNDED-LIVE-SESSION
