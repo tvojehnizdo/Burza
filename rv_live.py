@@ -133,6 +133,7 @@ def paper_evidence(path: Path = RV_DB_PATH) -> dict[str, Any]:
         and max_dd * 100.0 <= float(p["max_paper_drawdown_pct"])
     )
     return {
+        "database": str(path),
         "closed_pairs": len(closed),
         "net_pnl_czk": round(sum(pnls), 4),
         "wins": len(wins),
