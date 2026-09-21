@@ -18,11 +18,9 @@ jobs:
       - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python v4_smoke.py | tee v4-smoke.json
       - run: python smoke_live.py | tee smoke-report.json
-      - run: python research.py | tee research-report.json
       - uses: actions/upload-artifact@v4
         with:
           name: validation-reports
           path: |
             v4-smoke.json
             smoke-report.json
-            research-report.json
