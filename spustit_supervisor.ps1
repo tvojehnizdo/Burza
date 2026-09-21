@@ -65,6 +65,37 @@ function Load-OpenAIKey {
     } catch { return $null }
 }
 
+function Test-V4Health {
+    try {
+        $h = Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/health" -Method Get -TimeoutSec 3
+        return ($h.ok -eq $true)
+    }
+    catch { return $false }
+}
+
+function Ensure-V4Running {
+    if (Test-V4Health) {
+        Write-Host "V4 Pulse Engine already running on http://127.0.0.1:8765" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "V4 Pulse Engine neni dostupny. Spoustim ho automaticky..." -ForegroundColor Yellow
+    $proc = Start-Process -FilePath $Python -ArgumentList @(
+        "-m","uvicorn","app:app","--host","127.0.0.1","--port","8765"
+    ) -WorkingDirectory $PSScriptRoot -PassThru
+    $pidFile = Join-Path $PSScriptRoot "reports\v4.pid"
+    Set-Content -Encoding ASCII -Path $pidFile -Value $proc.Id
+
+    foreach ($i in 1..20) {
+        Start-Sleep -Seconds 1
+        if (Test-V4Health) {
+            Write-Host "V4 Pulse Engine spusten. PID=$($proc.Id)" -ForegroundColor Green
+            return
+        }
+    }
+    Write-Host "VAROVANI: V4 se do 20 s neprihlasil na portu 8765. Supervisor se spusti, ale V4 context nebude dostupny." -ForegroundColor Yellow
+}
+
 function Test-OpenAIKey([Security.SecureString]$Key) {
     $plain = Secure-ToPlain $Key
     if ([string]::IsNullOrWhiteSpace($plain)) { return $false }
@@ -141,6 +172,8 @@ while (-not $oa) {
     }
 }
 $env:OPENAI_API_KEY = Secure-ToPlain $oa
+
+Ensure-V4Running
 
 if (-not $env:OPENAI_SUPERVISOR_MODEL) { $env:OPENAI_SUPERVISOR_MODEL = "gpt-5.6-terra" }
 if (-not $env:SUPERVISOR_INTERVAL_S) { $env:SUPERVISOR_INTERVAL_S = "300" }
