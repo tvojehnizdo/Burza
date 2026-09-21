@@ -238,3 +238,6 @@ A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fa
 
 ### Futures canary validation
 A standalone Kraken Futures canary scans BTC/ETH/SOL using 1-minute derivatives candles, prices Tier-1 taker costs conservatively, caps one live position at 25% of futures equity and USD 3 notional, and requires exchange-side reduce-only stop/take-profit protection after entry.
+
+### Final live futures validation
+Validates dynamic PF_* discovery, Kraken instrument-derived tick/quantity rules, accepted sendStatus handling, trigger+limit protective orders, rescue of existing positions, and the one-shot live launcher.
