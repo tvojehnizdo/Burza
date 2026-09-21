@@ -15,7 +15,7 @@ FEE_BPS=float(os.getenv("FEE_BPS","10"))
 SLIPPAGE_BPS=float(os.getenv("SLIPPAGE_BPS","3"))
 MAX_DD=float(os.getenv("MAX_DRAWDOWN_PCT","10"))/100
 RISK_PCT=float(os.getenv("RISK_PER_TRADE_PCT","1.0"))/100
-SYMBOLS=os.getenv("SYMBOLS","BTCUSDT,ETHUSDT,SOLUSDT").split(",")
+SYMBOLS=os.getenv("SYMBOLS","BTCUSDT,ETHUSDT,SOLUSDT").split(",")\nPULSE_MIN=float(os.getenv("PULSE_MIN","0.62"))
 BYBIT="https://api.bybit.com"
 app=FastAPI(title="IMPULSE MAX 5K",version="1.0")
 
@@ -120,12 +120,12 @@ def optimize(symbol):
     candidates.sort(key=lambda z:z[0],reverse=True)
     _,p,tr,te=candidates[0]
     full=run_bt(df,symbol,p)
-    return {"params":p,"train":{k:v for k,v in tr.items() if k!="ledger"},
-            "test":{k:v for k,v in te.items() if k!="ledger"},"full":full}
+    # final untouched holdout: last 15% is reported separately and never used for parameter selection\n    h=int(len(df)*.85); holdout=run_bt(df.iloc[h:].reset_index(drop=True),symbol,p)\n    return {"params":p,"train":{k:v for k,v in tr.items() if k!="ledger"},
+            "test":{k:v for k,v in te.items() if k!="ledger"},"holdout":{k:v for k,v in holdout.items() if k!="ledger"},"full":full}
 
 @app.get("/",response_class=HTMLResponse)
 def home():
-    return """<html><head><title>IMPULSE MAX 5K</title><style>body{font-family:system-ui;max-width:980px;margin:40px auto;padding:0 16px;background:#0b1020;color:#e8eefc}button{padding:12px 18px}pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px}.ok{color:#7ee787}</style></head><body><h1>IMPULSE MAX 5K</h1><p>PAPER / REPLAY. Start 5 000 Kč. Spot, no leverage.</p><button id=b>Spustit optimalizaci + replay</button><pre id=o>Ready.</pre><script>b.onclick=async()=>{b.disabled=true;o.textContent='Running...';try{let r=await fetch('/api/run',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=e}b.disabled=false}</script></body></html>"""
+    return """<html><head><title>IMPULSE MAX 5K</title><style>body{font-family:system-ui;max-width:980px;margin:40px auto;padding:0 16px;background:#0b1020;color:#e8eefc}button{padding:12px 18px}pre{white-space:pre-wrap;background:#141b31;padding:16px;border-radius:12px}.ok{color:#7ee787}</style></head><body><h1>IMPULSE MAX 5K</h1><p>PAPER / REPLAY. Start 5 000 Kč. Spot, no leverage. Pulse filter rejects contradictory/noisy setups.</p><button id=b>Spustit optimalizaci + replay</button><pre id=o>Ready.</pre><script>b.onclick=async()=>{b.disabled=true;o.textContent='Running...';try{let r=await fetch('/api/run',{method:'POST'});o.textContent=JSON.stringify(await r.json(),null,2)}catch(e){o.textContent=e}b.disabled=false}</script></body></html>"""
 
 @app.post("/api/run")
 def run():
