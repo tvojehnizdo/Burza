@@ -191,3 +191,14 @@ Emergency stop:
 The AI Supervisor may DISARM live execution, lower leverage/risk, cancel orders and trigger a Futures dead-man switch. It may never arm LIVE itself.
 
 External withdrawals remain unavailable because the trading keys deliberately omit withdrawal/transfer access.
+
+
+## V4.3 market-neutral relative value
+
+The primary research path is now PF/FF relative value on Kraken Derivatives. The engine scans
+perpetual vs fixed-maturity contracts on the same underlying, uses executable bid/ask basis,
+models four maker executions plus an adverse-selection buffer, tracks expiry/funding context,
+and stores observations in `data/relative_value.db`.
+
+Run `start_v4_neutral.ps1` and inspect `/api/v4/relative-value`.
+Directional alpha remains PAPER-only and LIVE orders remain disabled.
