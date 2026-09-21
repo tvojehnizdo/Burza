@@ -11,7 +11,7 @@ POLICY_PATH = Path(os.getenv("SUPERVISOR_POLICY", "data/supervisor_policy.json")
 
 DEFAULT_POLICY = {
     "live_execution": False,
-    "allow_margin": True,
+    "allow_margin": False,
     "allow_cancel_all": True,
     "max_leverage": 2,
     "max_order_notional_pct_equity": 25.0,

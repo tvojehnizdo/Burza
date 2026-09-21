@@ -21,7 +21,7 @@ MIN_CLOSED = int(os.getenv("LIVE_MIN_PAPER_TRADES", "20"))
 MIN_WIN_RATE = float(os.getenv("LIVE_MIN_PAPER_WIN_RATE", "0.52"))
 MIN_NET_PNL = float(os.getenv("LIVE_MIN_PAPER_PNL_CZK", "1.0"))
 POSITION_PCT = float(os.getenv("LIVE_POSITION_PCT_EQUITY", "10.0"))
-LEVERAGE = int(os.getenv("LIVE_DEFAULT_LEVERAGE", "2"))
+LEVERAGE = int(os.getenv("LIVE_DEFAULT_LEVERAGE", "1"))
 POLL_S = float(os.getenv("LIVE_BRIDGE_POLL_S", "2.0"))
 
 
