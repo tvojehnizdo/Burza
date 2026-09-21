@@ -33,6 +33,9 @@ $env:KRAKEN_ENV_FILE = $envFile
 
 python kraken_private.py --env-file "$envFile" --json
 if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "Readiness failed. Sanitized env inspection follows (variable names only; no values)." -ForegroundColor Yellow
+    python kraken_private.py --env-file "$envFile" --inspect-env
     throw "Kraken readiness failed with exit code $LASTEXITCODE"
 }
 
