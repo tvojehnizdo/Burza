@@ -36,22 +36,24 @@ PID_PATH = Path("data/futures_autopilot.pid")
 
 LOOP_SEC = 5
 MIN_PROFIT_HOLD_SEC = 20
-SMALL_PROFIT_AFTER_SEC = 90
+SMALL_PROFIT_AFTER_SEC = 120
 NO_PROGRESS_SEC = 180
 HARD_MAX_HOLD_SEC = 480
 
 QUICK_PROFIT_GROSS_BPS = 45.0
-SMALL_PROFIT_GROSS_BPS = 35.0
+SMALL_PROFIT_GROSS_BPS = 60.0
 
 TRAIL_ACTIVATE_BPS = 45.0
-TRAIL_MIN_LOCK_BPS = 25.0
+TRAIL_MIN_LOCK_BPS = 30.0
 TRAIL_TIER_1_BPS = 70.0
 TRAIL_TIER_2_BPS = 120.0
 TRAIL_TIER_3_BPS = 200.0
+TRAIL_TIER_4_BPS = 300.0
 TRAIL_GAP_1_BPS = 18.0
 TRAIL_GAP_2_BPS = 14.0
 TRAIL_GAP_3_BPS = 10.0
 TRAIL_GAP_4_BPS = 8.0
+TRAIL_GAP_5_BPS = 6.0
 NO_PROGRESS_MAX_FAVORABLE_BPS = 45.0
 NO_PROGRESS_CURRENT_BPS = 22.0
 
@@ -415,6 +417,8 @@ def _close_position(client: Any, state: dict[str, Any], row: dict[str, Any], rea
 
 
 def _trailing_gap_bps(max_fav_bps: float) -> float:
+    if max_fav_bps >= TRAIL_TIER_4_BPS:
+        return TRAIL_GAP_5_BPS
     if max_fav_bps >= TRAIL_TIER_3_BPS:
         return TRAIL_GAP_4_BPS
     if max_fav_bps >= TRAIL_TIER_2_BPS:
