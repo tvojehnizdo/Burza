@@ -42,6 +42,16 @@ HARD_MAX_HOLD_SEC = 480
 
 QUICK_PROFIT_GROSS_BPS = 45.0
 SMALL_PROFIT_GROSS_BPS = 35.0
+
+TRAIL_ACTIVATE_BPS = 45.0
+TRAIL_MIN_LOCK_BPS = 25.0
+TRAIL_TIER_1_BPS = 70.0
+TRAIL_TIER_2_BPS = 120.0
+TRAIL_TIER_3_BPS = 200.0
+TRAIL_GAP_1_BPS = 18.0
+TRAIL_GAP_2_BPS = 14.0
+TRAIL_GAP_3_BPS = 10.0
+TRAIL_GAP_4_BPS = 8.0
 NO_PROGRESS_MAX_FAVORABLE_BPS = 45.0
 NO_PROGRESS_CURRENT_BPS = 22.0
 
@@ -74,6 +84,7 @@ def _load_state() -> dict[str, Any]:
             "auto_exits": 0,
             "quick_profit_exits": 0,
             "small_profit_exits": 0,
+            "trailing_profit_exits": 0,
             "no_progress_exits": 0,
             "hard_time_exits": 0,
             "protection_rescues": 0,
@@ -394,6 +405,7 @@ def _close_position(client: Any, state: dict[str, Any], row: dict[str, Any], rea
         key = {
             "QUICK_PROFIT": "quick_profit_exits",
             "SMALL_PROFIT": "small_profit_exits",
+            "TRAILING_PROFIT": "trailing_profit_exits",
             "NO_PROGRESS": "no_progress_exits",
             "HARD_MAX_HOLD": "hard_time_exits",
         }.get(reason)
@@ -402,19 +414,45 @@ def _close_position(client: Any, state: dict[str, Any], row: dict[str, Any], rea
     return result
 
 
+def _trailing_gap_bps(max_fav_bps: float) -> float:
+    if max_fav_bps >= TRAIL_TIER_3_BPS:
+        return TRAIL_GAP_4_BPS
+    if max_fav_bps >= TRAIL_TIER_2_BPS:
+        return TRAIL_GAP_3_BPS
+    if max_fav_bps >= TRAIL_TIER_1_BPS:
+        return TRAIL_GAP_2_BPS
+    return TRAIL_GAP_1_BPS
+
+
+def _trailing_floor_bps(max_fav_bps: float) -> float | None:
+    if max_fav_bps < TRAIL_ACTIVATE_BPS:
+        return None
+    return max(TRAIL_MIN_LOCK_BPS, max_fav_bps - _trailing_gap_bps(max_fav_bps))
+
+
 def _exit_reason(age_sec: float, pnl_bps: float, max_fav_bps: float) -> str | None:
     if age_sec >= HARD_MAX_HOLD_SEC:
         return "HARD_MAX_HOLD"
+
+    trail_floor = _trailing_floor_bps(max_fav_bps)
+    if trail_floor is not None:
+        # Once trailing is armed, let the winner run. Exit only after a
+        # meaningful pullback from the best favorable excursion.
+        if pnl_bps <= trail_floor:
+            return "TRAILING_PROFIT"
+        return None
+
     if (
         age_sec >= NO_PROGRESS_SEC
         and pnl_bps < NO_PROGRESS_CURRENT_BPS
         and max_fav_bps < NO_PROGRESS_MAX_FAVORABLE_BPS
     ):
         return "NO_PROGRESS"
+
+    # Fallback profit capture for trades that never armed the trailing mode.
     if age_sec >= SMALL_PROFIT_AFTER_SEC and pnl_bps >= SMALL_PROFIT_GROSS_BPS:
         return "SMALL_PROFIT"
-    if age_sec >= MIN_PROFIT_HOLD_SEC and pnl_bps >= QUICK_PROFIT_GROSS_BPS:
-        return "QUICK_PROFIT"
+
     return None
 
 
@@ -522,6 +560,9 @@ def _manage_positions(client: Any, state: dict[str, Any]) -> list[dict[str, Any]
         meta["last_pnl_bps"] = pnl_bps
         meta["last_mid"] = mid
         meta["last_age_sec"] = age_sec
+        meta["trailing_floor_bps"] = _trailing_floor_bps(max_fav)
+        meta["trailing_gap_bps"] = _trailing_gap_bps(max_fav) if max_fav >= TRAIL_ACTIVATE_BPS else None
+        meta["trailing_active"] = bool(max_fav >= TRAIL_ACTIVATE_BPS)
 
         reason = _exit_reason(age_sec, pnl_bps, max_fav)
         if reason:
@@ -627,6 +668,14 @@ def status() -> dict[str, Any]:
             "quick_profit_gross_bps": QUICK_PROFIT_GROSS_BPS,
             "small_profit_after_sec": SMALL_PROFIT_AFTER_SEC,
             "small_profit_gross_bps": SMALL_PROFIT_GROSS_BPS,
+            "trailing_activate_bps": TRAIL_ACTIVATE_BPS,
+            "trailing_min_lock_bps": TRAIL_MIN_LOCK_BPS,
+            "trailing_gap_tiers_bps": {
+                "45_to_70": TRAIL_GAP_1_BPS,
+                "70_to_120": TRAIL_GAP_2_BPS,
+                "120_to_200": TRAIL_GAP_3_BPS,
+                "200_plus": TRAIL_GAP_4_BPS,
+            },
             "no_progress_sec": NO_PROGRESS_SEC,
             "hard_max_hold_sec": HARD_MAX_HOLD_SEC,
             "max_open_positions": MAX_OPEN_POSITIONS,
@@ -647,8 +696,14 @@ def status() -> dict[str, Any]:
 
 def selftest() -> dict[str, Any]:
     checks = {
-        "quick_profit": _exit_reason(30, 31.0, 31.0) == "QUICK_PROFIT",
-        "small_profit": _exit_reason(100, 23.0, 23.0) == "SMALL_PROFIT",
+        "trailing_not_armed": _exit_reason(30, 31.0, 31.0) is None,
+        "trailing_holds_winner": _exit_reason(40, 48.0, 55.0) is None,
+        "trailing_exit": _exit_reason(40, 35.0, 55.0) == "TRAILING_PROFIT",
+        "trailing_tightens": (
+            _trailing_gap_bps(50.0) > _trailing_gap_bps(80.0)
+            > _trailing_gap_bps(130.0) > _trailing_gap_bps(220.0)
+        ),
+        "small_profit": _exit_reason(100, 36.0, 36.0) == "SMALL_PROFIT",
         "no_progress": _exit_reason(181, 5.0, 15.0) == "NO_PROGRESS",
         "hard_max": _exit_reason(481, 100.0, 100.0) == "HARD_MAX_HOLD",
         "no_early_exit": _exit_reason(10, 100.0, 100.0) is None,
