@@ -5,6 +5,31 @@ $Python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 $KrakenStore = "C:\TvojeHnizdo\Vault\Kraken\trading.credentials.dpapi.json"
 $FuturesStore = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
 $OpenAIStore = "C:\TvojeHnizdo\Vault\OpenAI\impulse-supervisor.dpapi.json"
+$SupervisorPortFile = Join-Path $PSScriptRoot "reports\ai-supervisor-port.txt"
+
+function Get-FreeTcpPort([int]$Start = 8771, [int]$End = 8799) {
+    foreach ($p in $Start..$End) {
+        $listener = $null
+        try {
+            $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p)
+            $listener.Start()
+            $listener.Stop()
+            return $p
+        }
+        catch {
+            if ($listener) {
+                try { $listener.Stop() } catch { }
+            }
+        }
+    }
+    throw "No free local TCP port found in range $Start-$End."
+}
+
+$SupervisorPort = Get-FreeTcpPort
+$SupervisorUrl = "http://127.0.0.1:$SupervisorPort"
+New-Item -ItemType Directory -Force -Path (Split-Path $SupervisorPortFile -Parent) | Out-Null
+Set-Content -Encoding ASCII -Path $SupervisorPortFile -Value $SupervisorPort
+$env:SUPERVISOR_PORT = [string]$SupervisorPort
 
 function Secure-ToPlain([Security.SecureString]$Secure) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
@@ -88,12 +113,12 @@ if (-not $env:SUPERVISOR_AUTO) { $env:SUPERVISOR_AUTO = "1" }
 
 Write-Host ""
 Write-Host "IMPULSE AI Supervisor starting..." -ForegroundColor Cyan
-Write-Host "Dashboard: http://127.0.0.1:8770" -ForegroundColor Green
+Write-Host "Dashboard: $SupervisorUrl" -ForegroundColor Green
 Write-Host "AUTO interval: $env:SUPERVISOR_INTERVAL_S s" -ForegroundColor Green
 Write-Host "AI cannot enable LIVE, withdrawals or wallet transfers." -ForegroundColor Yellow
 
-Start-Process "http://127.0.0.1:8770"
-& $Python -m uvicorn ai_supervisor:app --host 127.0.0.1 --port 8770
+Start-Process $SupervisorUrl
+& $Python -m uvicorn ai_supervisor:app --host 127.0.0.1 --port $SupervisorPort
 
 Remove-Item Env:KRAKEN_API_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:KRAKEN_API_SECRET -ErrorAction SilentlyContinue

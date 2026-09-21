@@ -30,6 +30,12 @@ jobs:
           }
       - shell: pwsh
         run: |
+          $text = Get-Content -Raw ./spustit_supervisor.ps1
+          if ($text -notmatch 'Get-FreeTcpPort') { throw "Dynamic port selection missing" }
+          if ($text -notmatch '8771') { throw "Supervisor port range missing" }
+          Write-Host "Dynamic supervisor port selection present"
+      - shell: pwsh
+        run: |
           $k = ConvertTo-SecureString "dummy-key-123456789" -AsPlainText -Force
           $s = ConvertTo-SecureString "dummy-secret-12345678901234567890" -AsPlainText -Force
           $obj = [ordered]@{ api_key = ConvertFrom-SecureString $k; api_secret = ConvertFrom-SecureString $s }
