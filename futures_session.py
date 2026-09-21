@@ -115,8 +115,11 @@ def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
         short_plan = plan_specific_candidate(short_symbol, "sell", pair)
         if not short_plan.get("ready"):
             rollback = _rollback_pair_leg(client, state, long_symbol, "PAIR_SECOND_LEG_NOT_READY")
-            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "rollback": rollback})
-            return {"ok": False, "reason": "PAIR_SECOND_LEG_NOT_READY", "pair": pair}
+            state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
+            state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 1
+            state["entry_halt_reason"] = "PAIR_SECOND_LEG_NOT_READY_CIRCUIT_BREAKER"
+            _log({"event": "PAIR_ENTRY_ROLLBACK", "pair": pair, "first": first, "rollback": rollback, "entry_halted": True})
+            return {"ok": False, "reason": "PAIR_SECOND_LEG_NOT_READY_CIRCUIT_BREAKER", "pair": pair}
 
         second = execute_candidate(dict(short_plan["candidate"]))
         if not (second.get("ok") and second.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"):
@@ -161,6 +164,12 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     pair_result = _try_pair_entry(state)
     if pair_result.get("reason") == "PAIR_AUTO_ENTRY_OPENED":
         return pair_result
+    if state.get("entry_halt_reason"):
+        return {
+            "ok": False,
+            "reason": str(state["entry_halt_reason"]),
+            "pair_reason": pair_result.get("reason"),
+        }
 
     plan = private_plan()
     if not plan.get("ready"):
