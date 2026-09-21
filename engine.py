@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -20,6 +22,8 @@ from alpha_discovery import (
     EXECUTION_MODE,
     VALIDATED_HORIZONS,
     SHADOW_HORIZONS,
+    latest_rows,
+    ALPHA_MAX_SPREAD_BPS,
 )
 from microstructure import KrakenMicroRecorder
 from relative_value import RelativeValueRuntime, scan_opportunities as scan_relative_value
@@ -613,6 +617,7 @@ small{color:#9aa9c7}
 <button onclick="go('/api/v4/start','POST')">Start recorder + alpha</button>
 <button onclick="go('/api/v4/models')">Alpha models</button>
 <button onclick="go('/api/v4/paper')">Paper ledger</button>
+<button onclick="go('/api/v4/executable-candidate')">Executable candidate</button>
 <button onclick="go('/api/v4/relative-value')">Relative value</button>
 <button onclick="go('/api/v4/fx-breakout')">GBP/JPY Breakout Lab</button>
 <button onclick="go('/api/futures-pulses')">Cross-asset futures scan</button>
@@ -685,6 +690,153 @@ def v4_status():
         "validated_horizons": list(VALIDATED_HORIZONS),
         "shadow_horizons": list(SHADOW_HORIZONS),
         "live_orders": False,
+    }
+
+
+
+def _read_kraken_readiness() -> dict[str, Any]:
+    path = Path("reports/kraken-readiness-latest.json")
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+def _pair_meta_by_wsname() -> dict[str, tuple[str, dict[str, Any]]]:
+    out: dict[str, tuple[str, dict[str, Any]]] = {}
+    try:
+        for internal, meta in asset_pairs().items():
+            ws = str(meta.get("wsname") or "")
+            if ws:
+                out[ws] = (str(meta.get("altname") or internal), meta)
+    except Exception:
+        pass
+    return out
+
+
+@app.get("/api/v4/executable-candidate")
+def v4_executable_candidate():
+    models = ALPHA_RUNTIME.last_models or {}
+    candidates = [
+        x for x in models.get("shadow_candidates", [])
+        if bool(x.get("cost_positive"))
+    ]
+    if not candidates:
+        return {
+            "ready": False,
+            "reason": "NO_COST_POSITIVE_CANDIDATE",
+            "actual_order_submitted": False,
+        }
+
+    latest = latest_rows()
+    if latest.empty:
+        return {
+            "ready": False,
+            "reason": "NO_FRESH_MARKET_STATE",
+            "actual_order_submitted": False,
+        }
+
+    by_state: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for model in candidates:
+        by_state.setdefault((str(model.get("symbol")), str(model.get("state_key"))), []).append(model)
+
+    pair_meta = _pair_meta_by_wsname()
+    readiness = _read_kraken_readiness()
+    balances = readiness.get("balance_nonzero") or {}
+    now_candidates: list[dict[str, Any]] = []
+
+    for _, row in latest.iterrows():
+        if float(row.spread_bps) > ALPHA_MAX_SPREAD_BPS:
+            continue
+        options = by_state.get((str(row.symbol), str(row.state_key)), [])
+        if not options:
+            continue
+        model = max(
+            options,
+            key=lambda z: (
+                float(z.get("net_edge_proxy_bps", 0.0)),
+                float(z.get("score", 0.0)),
+            ),
+        )
+
+        ws = str(row.symbol)
+        meta_row = pair_meta.get(ws)
+        if not meta_row or "/" not in ws:
+            continue
+        altname, meta = meta_row
+        base, quote = ws.split("/", 1)
+        side = str(model.get("side") or "").upper()
+
+        # Spot live-ready lane is long-only unless the base asset is already owned.
+        if side != "LONG":
+            continue
+
+        price = float(row.mid)
+        try:
+            ordermin = float(meta.get("ordermin") or 0.0)
+        except Exception:
+            ordermin = 0.0
+        try:
+            costmin = float(meta.get("costmin") or 0.0)
+        except Exception:
+            costmin = 0.0
+        min_notional = max(costmin, ordermin * price)
+
+        if quote == "USD":
+            quote_balance = float(balances.get("ZUSD") or balances.get("USD") or 0.0)
+        elif quote == "USDC":
+            quote_balance = float(balances.get("USDC") or 0.0)
+        else:
+            quote_balance = 0.0
+
+        deployable = max(0.0, quote_balance * 0.95)
+        executable = deployable >= min_notional and min_notional > 0
+        volume = deployable / price if executable and price > 0 else 0.0
+
+        now_candidates.append({
+            "symbol": ws,
+            "kraken_pair": altname,
+            "side": "buy",
+            "quote": quote,
+            "price": price,
+            "available_quote": round(quote_balance, 8),
+            "deployable_quote_95pct": round(deployable, 8),
+            "ordermin_base": ordermin,
+            "costmin_quote": costmin,
+            "minimum_notional_quote": round(min_notional, 8),
+            "volume_base": round(volume, 12),
+            "net_edge_proxy_bps": float(model.get("net_edge_proxy_bps", 0.0)),
+            "gross_edge_bps": float(model.get("gross_edge_bps", 0.0)),
+            "score": float(model.get("score", 0.0)),
+            "horizon_s": int(model.get("horizon_s", 0)),
+            "executable_now": bool(executable),
+        })
+
+    if not now_candidates:
+        return {
+            "ready": False,
+            "reason": "NO_CURRENT_STATE_MATCH",
+            "actual_order_submitted": False,
+        }
+
+    now_candidates.sort(
+        key=lambda x: (
+            bool(x["executable_now"]),
+            float(x["net_edge_proxy_bps"]),
+            float(x["score"]),
+        ),
+        reverse=True,
+    )
+    best = now_candidates[0]
+    return {
+        "ready": bool(best["executable_now"]),
+        "reason": "READY_FOR_MANUAL_EXECUTION" if best["executable_now"] else "INSUFFICIENT_BALANCE_OR_MINIMUM",
+        "candidate": best,
+        "alternatives": now_candidates[:10],
+        "manual_execution_required": True,
+        "actual_order_submitted": False,
     }
 
 
