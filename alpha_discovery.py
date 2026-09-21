@@ -66,6 +66,24 @@ ECONOMIC_COST_LANES_BPS = {
     "futures_maker_proxy": float(os.getenv("V4_FUTURES_MAKER_PROXY_BPS", "11")),
 }
 
+# Preferred economic research path: maker-only perpetual futures. This is an
+# isolated PAPER proxy driven by the spot microstructure signal and never
+# counts toward LIVE readiness. Actual futures orderbook/fill validation is
+# required before any promotion to real execution.
+SCENARIO_ENABLED = os.getenv("SCENARIO_PAPER_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+SCENARIO_NAME = "FUTURES_MAKER_PROXY"
+SCENARIO_COST_BPS = ECONOMIC_COST_LANES_BPS["futures_maker_proxy"]
+SCENARIO_MIN_NET_EDGE_BPS = float(os.getenv("SCENARIO_MIN_NET_EDGE_BPS", "5"))
+SCENARIO_MIN_TRAIN = int(os.getenv("SCENARIO_MIN_TRAIN", "20"))
+SCENARIO_MIN_VALID = int(os.getenv("SCENARIO_MIN_VALID", "12"))
+SCENARIO_MIN_HIT = float(os.getenv("SCENARIO_MIN_HIT", "0.52"))
+SCENARIO_MAX_OPEN = int(os.getenv("SCENARIO_MAX_OPEN", "4"))
+SCENARIO_ALLOC_PCT = float(os.getenv("SCENARIO_ALLOC_PCT", "10")) / 100.0
+SCENARIO_MAX_DD_PCT = float(os.getenv("SCENARIO_MAX_DRAWDOWN_PCT", "15"))
+SCENARIO_HORIZONS = tuple(
+    int(x.strip()) for x in os.getenv("SCENARIO_HORIZONS", "300,600,900").split(",") if x.strip()
+)
+
 
 def ternary(value: float, threshold: float) -> int:
     if value > threshold:
@@ -438,6 +456,147 @@ def shadow_equity(db_path: Path = DB_PATH) -> float:
         return START_CAPITAL
 
 
+def scenario_equity(db_path: Path = DB_PATH) -> float:
+    value = get_meta("scenario_equity", START_CAPITAL, db_path)
+    try:
+        return float(value)
+    except Exception:
+        return START_CAPITAL
+
+
+def resolve_scenario_paper(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    """Resolve the futures-maker economic proxy on observed spot mids."""
+    t = now_ms()
+    closed: list[dict[str, Any]] = []
+    with connect_db(db_path) as con:
+        rows = con.execute(
+            """SELECT id,opened_ms,symbol,side,horizon_s,entry,notional_czk,cost_bps
+               FROM scenario_paper_trades
+               WHERE scenario=? AND status='OPEN' AND opened_ms + horizon_s*1000 <= ?""",
+            (SCENARIO_NAME, t),
+        ).fetchall()
+        for row in rows:
+            trade_id, opened, symbol, side, horizon, entry, notional, cost_bps = row
+            px = con.execute(
+                """SELECT mid,ts_ms FROM micro_snapshots
+                   WHERE symbol=? AND ts_ms>=? ORDER BY ts_ms ASC LIMIT 1""",
+                (symbol, opened + horizon * 1000),
+            ).fetchone()
+            if not px:
+                continue
+            exit_px, closed_ms = float(px[0]), int(px[1])
+            sign = 1.0 if side == "LONG" else -1.0
+            gross_bps = sign * (exit_px / float(entry) - 1.0) * 10000.0
+            net_bps = gross_bps - float(cost_bps)
+            pnl = float(notional) * net_bps / 10000.0
+            con.execute(
+                """UPDATE scenario_paper_trades
+                   SET closed_ms=?,exit=?,pnl_czk=?,net_bps=?,status='CLOSED'
+                   WHERE id=?""",
+                (closed_ms, exit_px, pnl, net_bps, trade_id),
+            )
+            closed.append({
+                "id": trade_id, "symbol": symbol, "side": side,
+                "net_bps": round(net_bps, 3), "pnl_czk": round(pnl, 3),
+            })
+    if closed:
+        eq = scenario_equity(db_path) + sum(x["pnl_czk"] for x in closed)
+        set_meta("scenario_equity", eq, db_path)
+    return closed
+
+
+def maybe_open_scenario_paper(models: dict[str, Any], db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    """Open only economically viable futures-maker proxy candidates.
+
+    This does not simulate futures basis/funding/queue fills and is therefore
+    research-only. It cannot satisfy the validated PAPER/LIVE gate.
+    """
+    if not SCENARIO_ENABLED:
+        return []
+    candidates = []
+    for model in models.get("shadow_candidates", []):
+        gross = float(model.get("gross_edge_bps", 0.0))
+        if int(model.get("horizon_s", 0)) not in SCENARIO_HORIZONS:
+            continue
+        if int(model.get("train_n", 0)) < SCENARIO_MIN_TRAIN or int(model.get("valid_n", 0)) < SCENARIO_MIN_VALID:
+            continue
+        if float(model.get("train_hit", 0.0)) < SCENARIO_MIN_HIT or float(model.get("valid_hit", 0.0)) < SCENARIO_MIN_HIT:
+            continue
+        scenario_net = gross - SCENARIO_COST_BPS
+        if scenario_net < SCENARIO_MIN_NET_EDGE_BPS:
+            continue
+        item = dict(model)
+        item["scenario_net_edge_bps"] = scenario_net
+        candidates.append(item)
+    if not candidates:
+        return []
+
+    eq = scenario_equity(db_path)
+    if eq <= START_CAPITAL * (1.0 - SCENARIO_MAX_DD_PCT / 100.0):
+        set_meta("scenario_paper_halted", {"reason": "MAX_DRAWDOWN", "equity": eq}, db_path)
+        return []
+
+    with connect_db(db_path) as con:
+        open_rows = con.execute(
+            "SELECT symbol FROM scenario_paper_trades WHERE scenario=? AND status='OPEN'",
+            (SCENARIO_NAME,),
+        ).fetchall()
+    open_symbols = {r[0] for r in open_rows}
+    slots = max(0, SCENARIO_MAX_OPEN - len(open_symbols))
+    if slots <= 0:
+        return []
+
+    by_state: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for model in candidates:
+        by_state.setdefault((model["symbol"], model["state_key"]), []).append(model)
+
+    latest = latest_rows(db_path)
+    t = now_ms()
+    matches: list[tuple[float, dict[str, Any], Any]] = []
+    for _, row in latest.iterrows():
+        if row.symbol in open_symbols or t - int(row.ts_ms) > 5_000:
+            continue
+        if float(row.spread_bps) > ALPHA_MAX_SPREAD_BPS:
+            continue
+        options = by_state.get((row.symbol, row.state_key), [])
+        if not options:
+            continue
+        model = max(options, key=lambda z: (z["scenario_net_edge_bps"], z["score"]))
+        matches.append((model["scenario_net_edge_bps"], model, row))
+    matches.sort(key=lambda z: (z[0], z[1]["score"]), reverse=True)
+
+    notional = max(0.0, min(eq * SCENARIO_ALLOC_PCT, eq))
+    opened: list[dict[str, Any]] = []
+    for _, model, row in matches[:slots]:
+        with connect_db(db_path) as con:
+            cur = con.execute(
+                """INSERT INTO scenario_paper_trades(
+                    opened_ms,symbol,side,horizon_s,entry,notional_czk,
+                    gross_edge_bps,score,cost_bps,state_key,scenario,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?, 'OPEN')""",
+                (
+                    t, row.symbol, model["side"], int(model["horizon_s"]), float(row.mid), notional,
+                    float(model["gross_edge_bps"]), float(model["score"]), SCENARIO_COST_BPS,
+                    row.state_key, SCENARIO_NAME,
+                ),
+            )
+            trade_id = cur.lastrowid
+        opened.append({
+            "id": trade_id,
+            "scenario": SCENARIO_NAME,
+            "symbol": row.symbol,
+            "side": model["side"],
+            "horizon_s": int(model["horizon_s"]),
+            "entry": float(row.mid),
+            "notional_czk": round(notional, 2),
+            "gross_edge_bps": float(model["gross_edge_bps"]),
+            "scenario_net_edge_bps": round(float(model["scenario_net_edge_bps"]), 4),
+            "cost_bps": SCENARIO_COST_BPS,
+            "validation_level": "ECONOMIC_PROXY_ONLY",
+        })
+    return opened
+
+
 def resolve_shadow_paper(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
     t = now_ms()
     closed: list[dict[str, Any]] = []
@@ -672,9 +831,11 @@ class AlphaRuntime:
             try:
                 closed = resolve_paper(self.db_path)
                 shadow_closed = resolve_shadow_paper(self.db_path)
+                scenario_closed = resolve_scenario_paper(self.db_path)
                 models = discover_models(self.db_path)
                 opened = maybe_open_paper(models, self.db_path)
                 shadow_opened = maybe_open_shadow_paper(models, self.db_path)
+                scenario_opened = maybe_open_scenario_paper(models, self.db_path)
                 self.last_models = models
                 self.last_cycle_ms = now_ms()
                 set_meta("alpha_last", {
@@ -686,6 +847,8 @@ class AlphaRuntime:
                     "closed": closed,
                     "shadow_opened": shadow_opened,
                     "shadow_closed": shadow_closed,
+                    "scenario_opened": scenario_opened,
+                    "scenario_closed": scenario_closed,
                 }, self.db_path)
                 self.last_error = None
             except Exception as exc:
@@ -700,6 +863,14 @@ class AlphaRuntime:
             closed_n = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status='CLOSED'").fetchone()[0]
             shadow_open_n = con.execute("SELECT COUNT(*) FROM shadow_paper_trades WHERE status='OPEN'").fetchone()[0]
             shadow_closed_n = con.execute("SELECT COUNT(*) FROM shadow_paper_trades WHERE status='CLOSED'").fetchone()[0]
+            scenario_open_n = con.execute(
+                "SELECT COUNT(*) FROM scenario_paper_trades WHERE scenario=? AND status='OPEN'",
+                (SCENARIO_NAME,),
+            ).fetchone()[0]
+            scenario_closed_n = con.execute(
+                "SELECT COUNT(*) FROM scenario_paper_trades WHERE scenario=? AND status='CLOSED'",
+                (SCENARIO_NAME,),
+            ).fetchone()[0]
             rows = con.execute("SELECT COUNT(*) FROM micro_snapshots").fetchone()[0]
             recent = [
                 {
@@ -720,6 +891,19 @@ class AlphaRuntime:
                 for r in con.execute(
                     """SELECT id,symbol,side,horizon_s,status,pnl_czk,net_bps,signal_kind
                        FROM shadow_paper_trades ORDER BY id DESC LIMIT 10"""
+                ).fetchall()
+            ]
+            recent_scenario = [
+                {
+                    "id": r[0], "symbol": r[1], "side": r[2], "horizon_s": r[3],
+                    "status": r[4], "pnl_czk": r[5], "net_bps": r[6],
+                    "gross_edge_bps": r[7], "cost_bps": r[8],
+                }
+                for r in con.execute(
+                    """SELECT id,symbol,side,horizon_s,status,pnl_czk,net_bps,gross_edge_bps,cost_bps
+                       FROM scenario_paper_trades
+                       WHERE scenario=? ORDER BY id DESC LIMIT 10""",
+                    (SCENARIO_NAME,),
                 ).fetchall()
             ]
         return {
@@ -744,6 +928,20 @@ class AlphaRuntime:
                 ),
                 "recent": recent_shadow,
                 "counts_for_live_gate": False,
+            },
+            "preferred_scenario": {
+                "enabled": SCENARIO_ENABLED,
+                "name": SCENARIO_NAME,
+                "cost_bps": SCENARIO_COST_BPS,
+                "min_net_edge_bps": SCENARIO_MIN_NET_EDGE_BPS,
+                "horizons": list(SCENARIO_HORIZONS),
+                "equity": round(scenario_equity(self.db_path), 2),
+                "open_trades": scenario_open_n,
+                "closed_trades": scenario_closed_n,
+                "recent": recent_scenario,
+                "counts_for_live_gate": False,
+                "actual_futures_validation_required": True,
+                "live_orders": False,
             },
             "live_orders": False,
         }

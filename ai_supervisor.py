@@ -27,7 +27,7 @@ AUTO_INTERVAL = int(os.getenv("SUPERVISOR_INTERVAL_S", "300"))
 AUTO = os.getenv("SUPERVISOR_AUTO", "0").lower() in {"1", "true", "yes", "on"}
 CONTROL = os.getenv("SUPERVISOR_CONTROL", "1").lower() in {"1", "true", "yes", "on"}
 LOG_PATH = Path(os.getenv("SUPERVISOR_LOG", "reports/ai-supervisor.jsonl"))
-EXPECTED_V4_BUILD = "4.1-cost-aware"
+EXPECTED_V4_BUILD = "4.2-futures-maker-proxy"
 
 app = FastAPI(title="IMPULSE AI Supervisor", version="1.0")
 

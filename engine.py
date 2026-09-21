@@ -37,7 +37,7 @@ SCAN_WORKERS = int(os.getenv("SCAN_WORKERS", "4"))
 SYMBOLS = [s.strip() for s in os.getenv("SYMBOLS", "XBTUSD,ETHUSD,SOLUSD").split(",") if s.strip()]
 FUTURES_SYMBOLS = [s.strip() for s in os.getenv("FUTURES_SYMBOLS", "PF_XBTUSD,PF_ETHUSD,PF_SOLUSD,PF_XAUUSD,PF_XAGUSD,PF_WTIOILUSD,PF_AAPLXUSD,PF_GOOGLXUSD,PF_TSLAXUSD").split(",") if s.strip()]
 
-ENGINE_BUILD = "4.1-cost-aware"
+ENGINE_BUILD = "4.2-futures-maker-proxy"
 app = FastAPI(title="IMPULSE MAX 5K - Kraken Pulse Hunter", version=ENGINE_BUILD)
 RECORDER = KrakenMicroRecorder()
 ALPHA_RUNTIME = AlphaRuntime()
@@ -694,16 +694,27 @@ def v4_paper():
                       net_bps,state_key,signal_kind,status
                FROM shadow_paper_trades ORDER BY id DESC LIMIT 100"""
         ).fetchall()
+        scenario_rows = con.execute(
+            """SELECT id,opened_ms,closed_ms,symbol,side,horizon_s,entry,exit,
+                      notional_czk,gross_edge_bps,score,cost_bps,pnl_czk,
+                      net_bps,state_key,scenario,status
+               FROM scenario_paper_trades ORDER BY id DESC LIMIT 100"""
+        ).fetchall()
     cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
             "notional_czk","model_edge_bps","model_score","cost_bps","pnl_czk",
             "net_bps","state_key","status"]
     shadow_cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
                    "notional_czk","signal_edge_bps","signal_score","cost_bps","pnl_czk",
                    "net_bps","state_key","signal_kind","status"]
+    scenario_cols = ["id","opened_ms","closed_ms","symbol","side","horizon_s","entry","exit",
+                     "notional_czk","gross_edge_bps","score","cost_bps","pnl_czk",
+                     "net_bps","state_key","scenario","status"]
     return {
         "trades": [dict(zip(cols, r)) for r in rows],
         "shadow_trades": [dict(zip(shadow_cols, r)) for r in shadow_rows],
+        "scenario_trades": [dict(zip(scenario_cols, r)) for r in scenario_rows],
         "shadow_counts_for_live_gate": False,
+        "scenario_counts_for_live_gate": False,
         "live_orders": False,
     }
 
