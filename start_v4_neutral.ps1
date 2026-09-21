@@ -21,7 +21,22 @@ python -m pip install -r requirements.txt
 
 $env:AUTO_RECORD = "1"
 $env:START_CAPITAL = "5000"
-$env:WS_SYMBOLS = "BTC/USD,ETH/USD,SOL/USD,XRP/USD,DOGE/USD,ADA/USD,LINK/USD,LTC/USD,BCH/USD,AVAX/USD,DOT/USD,XLM/USD"
+# Dynamic liquid USD/USDC universe. Keep BTC/USD as model reference even
+# when a BTC/USDC market would otherwise rank higher.
+$dynamicSymbols = ""
+try {
+    $dynamicSymbols = (& ".\.venv\Scripts\python.exe" "dynamic_universe.py" --max 24 --max-spread-bps 20 --format csv).Trim()
+} catch { }
+if ([string]::IsNullOrWhiteSpace($dynamicSymbols)) {
+    $dynamicSymbols = "BTC/USD,ETH/USD,SOL/USD,XRP/USD,DOGE/USD,ADA/USD,LINK/USD,LTC/USD,BCH/USD,AVAX/USD,DOT/USD,XLM/USD"
+}
+$parts = @($dynamicSymbols.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($parts -notcontains "BTC/USD") {
+    $parts = @("BTC/USD") + $parts
+}
+$parts = @($parts | Select-Object -Unique | Select-Object -First 25)
+$env:WS_SYMBOLS = ($parts -join ",")
+$env:UNIVERSE_MAX = "24"
 $env:MICRO_SNAPSHOT_MS = "1000"
 $env:DATA_DB = "data/pulse_hunter_v1.db"
 
@@ -87,7 +102,8 @@ Write-Host "Scanner cadence: 5 s (FAST PAPER)" -ForegroundColor Green
 Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" -ForegroundColor Green
 Write-Host "Entry: robust basis deviation >= 1.5 sigma after >=60 quality observations; min net edge 5 bps" -ForegroundColor Green
 Write-Host "History: 30 s decimation; pair spread quality cap 15 bps" -ForegroundColor Green
-Write-Host "Sequential SHADOW hunter: ON | 12 spot pairs | max 1 trade | 100% simulated allocation" -ForegroundColor Green
+Write-Host ("Sequential SHADOW hunter: ON | dynamic USD/USDC universe=" + $env:WS_SYMBOLS) -ForegroundColor Green
+Write-Host "Mode: max 1 trade | 100% simulated allocation | direct USDC preferred when economical" -ForegroundColor Green
 Write-Host "Hunter ledger: data/pulse_hunter_v1.db (isolated from legacy SHADOW)" -ForegroundColor Green
 Write-Host "Futures-maker scenario: ON | max 1 trade | 100% simulated allocation" -ForegroundColor Green
 Write-Host "Unvalidated/no-cost-edge churn: OFF" -ForegroundColor Yellow
