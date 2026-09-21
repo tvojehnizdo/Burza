@@ -52,12 +52,12 @@ $env:SHADOW_MAX_DRAWDOWN_PCT = "40"
 
 # Keep the economically cheaper research lane active in parallel.
 $env:SCENARIO_PAPER_ENABLED = "1"
-$env:SCENARIO_HORIZONS = "60,120,300"
-$env:SCENARIO_MIN_NET_EDGE_BPS = "2"
-$env:SCENARIO_MIN_TRAIN = "12"
-$env:SCENARIO_MIN_VALID = "6"
-$env:SCENARIO_MIN_HIT = "0.50"
-$env:SCENARIO_MAX_OPEN = "8"
+$env:SCENARIO_HORIZONS = "15,30,60,120"
+$env:SCENARIO_MIN_NET_EDGE_BPS = "0"
+$env:SCENARIO_MIN_TRAIN = "6"
+$env:SCENARIO_MIN_VALID = "3"
+$env:SCENARIO_MIN_HIT = "0.46"
+$env:SCENARIO_MAX_OPEN = "16"
 $env:SCENARIO_ALLOC_PCT = "5"
 
 # Never lower costs by accident on the spot execution model.
@@ -70,6 +70,7 @@ Write-Host ""
 Write-Host "Decision cycle: 3 s | model refresh: 30 s" -ForegroundColor Green
 Write-Host "Shadow horizons: 15/30/60/120 s | max open: 16 | max per symbol: 4" -ForegroundColor Green
 Write-Host "Unvalidated exploration: ON (SHADOW only)" -ForegroundColor Yellow
+Write-Host "Futures-maker proxy: 15/30/60/120 s | 11 bps cost floor" -ForegroundColor Green
 Write-Host "LIVE orders: DISABLED" -ForegroundColor Yellow
 Write-Host "Dashboard: http://127.0.0.1:8765" -ForegroundColor Green
 Write-Host ""
