@@ -76,11 +76,52 @@ def _latest_session_start(events: list[dict[str, Any]], state: dict[str, Any]) -
     return int(time.time() * 1000) - 24 * 3600 * 1000
 
 
+def _normalize_position_event(row: dict[str, Any]) -> dict[str, Any]:
+    expected = {
+        "tradeable", "oldPosition", "newPosition", "positionChange",
+        "executionPrice", "executionSize", "fee", "realizedPnL",
+        "realizedFunding", "tradeType", "updateReason", "fillTime",
+    }
+    if expected.intersection(row.keys()):
+        return row
+
+    candidates: list[dict[str, Any]] = []
+
+    def walk(obj: Any, depth: int = 0) -> None:
+        if depth > 4:
+            return
+        if isinstance(obj, dict):
+            if expected.intersection(obj.keys()):
+                candidates.append(obj)
+            for value in obj.values():
+                if isinstance(value, (dict, list)):
+                    walk(value, depth + 1)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value, depth + 1)
+
+    walk(row)
+
+    if not candidates:
+        return row
+
+    best = max(candidates, key=lambda x: len(expected.intersection(x.keys())))
+    merged = dict(row)
+    merged.update(best)
+
+    # Preserve wrapper timestamps/ids when payload omits them.
+    if not merged.get("timestamp"):
+        merged["timestamp"] = row.get("timestamp") or row.get("lastUpdateTimestamp")
+    if not merged.get("fillTime"):
+        merged["fillTime"] = best.get("fillTime") or row.get("fillTime")
+    return merged
+
+
 def _position_events(client: Any, since_ms: int) -> list[dict[str, Any]]:
     # Kraken history endpoint currently returns up to 100 events per request.
     body = client.position_events(since=since_ms, count=100, sort="asc")
     rows = body.get("elements") or []
-    return [x for x in rows if isinstance(x, dict)]
+    return [_normalize_position_event(x) for x in rows if isinstance(x, dict)]
 
 
 def _candles(symbol: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
@@ -236,12 +277,15 @@ def _event_diagnostics(events: list[dict[str, Any]]) -> dict[str, Any]:
     position_changes = Counter()
     update_reasons = Counter()
     trade_types = Counter()
+    key_counts = Counter()
     samples: list[dict[str, Any]] = []
 
     for e in events:
         position_changes[str(e.get("positionChange") or "missing")] += 1
         update_reasons[str(e.get("updateReason") or "missing")] += 1
         trade_types[str(e.get("tradeType") or "missing")] += 1
+        for key in e.keys():
+            key_counts[str(key)] += 1
 
     for e in events[-12:]:
         samples.append({
@@ -264,6 +308,7 @@ def _event_diagnostics(events: list[dict[str, Any]]) -> dict[str, Any]:
         "position_change_counts": dict(position_changes),
         "update_reason_counts": dict(update_reasons),
         "trade_type_counts": dict(trade_types),
+        "raw_top_level_key_counts": dict(key_counts),
         "last_events": samples,
     }
 
@@ -432,6 +477,7 @@ def _md(report: dict[str, Any]) -> str:
     lines.append(f"- positionChange counts: {diag.get('position_change_counts')}")
     lines.append(f"- updateReason counts: {diag.get('update_reason_counts')}")
     lines.append(f"- tradeType counts: {diag.get('trade_type_counts')}")
+    lines.append(f"- event key counts: {diag.get('raw_top_level_key_counts')}")
     lines.append(f"- Local AUTO_EXIT attempts: {len(report.get('local_exit_attempts') or [])}")
 
     for row in report.get("local_exit_attempts") or []:
