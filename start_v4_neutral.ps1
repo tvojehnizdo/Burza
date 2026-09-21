@@ -1,0 +1,56 @@
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+
+Write-Host "IMPULSE MAX 5K - MARKET NEUTRAL RELATIVE VALUE" -ForegroundColor Cyan
+Write-Host "PAPER / RESEARCH only. LIVE orders are disabled." -ForegroundColor Yellow
+
+$oldListener = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique
+if ($oldListener) {
+    Write-Host "Stopping existing listener on port 8765 (PID $oldListener)..." -ForegroundColor Yellow
+    Stop-Process -Id $oldListener -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}
+
+if (-not (Test-Path ".\.venv\Scripts\python.exe")) {
+    py -m venv .venv
+}
+Set-ExecutionPolicy -Scope Process Bypass -Force
+& ".\.venv\Scripts\Activate.ps1"
+python -m pip install -r requirements.txt
+
+$env:AUTO_RECORD = "1"
+$env:START_CAPITAL = "5000"
+$env:WS_SYMBOLS = "BTC/USD,ETH/USD,SOL/USD,XRP/USD"
+$env:MICRO_SNAPSHOT_MS = "1000"
+
+# Directional engine remains strict and slow; unvalidated shadow churn is off.
+$env:ALPHA_INTERVAL_S = "30"
+$env:ALPHA_MODEL_REFRESH_S = "60"
+$env:SHADOW_PAPER_ENABLED = "0"
+$env:SHADOW_ALLOW_UNVALIDATED = "0"
+$env:SCENARIO_PAPER_ENABLED = "0"
+
+# Primary engine: delta-neutral PF <-> FF basis/funding discovery.
+$env:RV_SCAN_INTERVAL_S = "10"
+$env:RV_MAKER_FEE_BPS = "2"
+$env:RV_ADVERSE_BUFFER_BPS = "4"
+$env:RV_MIN_NET_EDGE_BPS = "8"
+$env:RV_MIN_DAYS_TO_EXPIRY = "0.5"
+$env:RV_MAX_DAYS_TO_EXPIRY = "220"
+$env:RV_HISTORY_WINDOW = "500"
+$env:RV_DB = "data/relative_value.db"
+
+Write-Host ""
+Write-Host "Primary strategy: PF/FF market-neutral relative value" -ForegroundColor Green
+Write-Host "Scanner cadence: 10 s" -ForegroundColor Green
+Write-Host "Round-trip maker fee floor: 8 bps + 4 bps adverse-selection buffer" -ForegroundColor Green
+Write-Host "Minimum residual edge: 8 bps (gross executable basis must clear ~20 bps)" -ForegroundColor Green
+Write-Host "Directional unvalidated shadow: OFF" -ForegroundColor Yellow
+Write-Host "LIVE orders: DISABLED" -ForegroundColor Yellow
+Write-Host "Dashboard: http://127.0.0.1:8765" -ForegroundColor Green
+Write-Host "Relative value: http://127.0.0.1:8765/api/v4/relative-value" -ForegroundColor Green
+Write-Host ""
+
+Start-Process "http://127.0.0.1:8765"
+python -m uvicorn app:app --host 127.0.0.1 --port 8765
