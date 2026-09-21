@@ -52,6 +52,37 @@ try {
         exit 1
     }
 
+    Write-Host ""
+    Write-Host "Kontroluji existujici Futures pozici a ochranu..." -ForegroundColor Cyan
+    $rescueJson = & $Python "futures_canary.py" --rescue
+    if ($LASTEXITCODE -ne 0) {
+        throw "Rescue kontrola selhala."
+    }
+    $rescueJson | Write-Host
+
+    try {
+        $rescue = ($rescueJson -join [Environment]::NewLine) | ConvertFrom-Json
+    }
+    catch {
+        throw "Rescue vratil necitelny JSON."
+    }
+
+    if ([string]$rescue.reason -eq "EXISTING_POSITION_PROTECTED") {
+        Write-Host ""
+        Write-Host ("Existujici pozice " + [string]$rescue.symbol + " je nyni chranena STOP + TAKE PROFIT.") -ForegroundColor Green
+        Write-Host "Dalsi pozici neoteviram, dokud tato existuje." -ForegroundColor Green
+        exit 0
+    }
+
+    if ([string]$rescue.reason -eq "MULTIPLE_EXISTING_POSITIONS" -or [string]$rescue.reason -eq "RESCUE_FLATTEN_FAILED") {
+        Write-Host ("STOP: rescue reason=" + [string]$rescue.reason) -ForegroundColor Red
+        exit 2
+    }
+
+    if ([string]$rescue.reason -eq "EXISTING_POSITION_FLATTENED") {
+        Write-Host "Stara nekompletne chranena pozice byla zplostena. Pokracuji do noveho signalu." -ForegroundColor Yellow
+    }
+
     $deadline = (Get-Date).AddMinutes(20)
     $attempt = 0
 
