@@ -700,15 +700,62 @@ def execute() -> dict[str, Any]:
         save_policy({"live_execution": False})
 
 
+def live_status() -> dict[str, Any]:
+    client = client_from_env()
+    r = readiness()
+    pos_payload = client.open_positions()
+    positions = position_map(pos_payload)
+    orders = client.open_orders()
+
+    events: list[dict[str, Any]] = []
+    if EVENT_LOG.exists():
+        try:
+            lines = EVENT_LOG.read_text(encoding="utf-8").splitlines()
+            for line in lines[-100:]:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        events.append(row)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    submitted = [e for e in events if e.get("actual_order_submitted")]
+    protected = [e for e in events if e.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION"]
+    aborted = [e for e in events if e.get("reason") == "FUTURES_CANARY_ABORTED"]
+
+    return {
+        "ok": True,
+        "equity_usd": r.get("equity_usd"),
+        "open_position_count": len(positions),
+        "positions": positions,
+        "open_orders": orders,
+        "policy": r.get("policy"),
+        "live_execution": r.get("live_execution"),
+        "event_log": {
+            "rows": len(events),
+            "submitted_live_events": len(submitted),
+            "protected_live_events": len(protected),
+            "aborted_live_events": len(aborted),
+            "last_events": events[-10:],
+        },
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--public", action="store_true")
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--rescue", action="store_true")
+    ap.add_argument("--status", action="store_true")
     ap.add_argument("--confirm", default="")
     args = ap.parse_args()
 
+    if args.status:
+        print(json.dumps(live_status(), indent=2, ensure_ascii=False, default=str))
+        return
     if args.rescue:
         print(json.dumps(rescue_existing_position(), indent=2, ensure_ascii=False, default=str))
         return
