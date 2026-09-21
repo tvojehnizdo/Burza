@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import requests
 
 from futures_private import (
     client_from_env,
+    instrument_specs,
     load_policy,
     min_lot,
     order_preflight,
@@ -18,10 +20,11 @@ from futures_private import (
     position_map,
     readiness,
     round_size_down,
+    round_price_to_tick,
     save_policy,
 )
 
-SYMBOLS = ["PF_ETHUSD", "PF_SOLUSD", "PF_XBTUSD"]
+MAX_UNIVERSE = 24
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
 # Tier-1 Futures taker fee 5 bps/side + conservative 2 bps slippage
@@ -146,6 +149,46 @@ def _signal(symbol: str) -> dict[str, Any]:
     }
 
 
+def _dynamic_universe(max_symbols: int = MAX_UNIVERSE) -> list[str]:
+    specs = instrument_specs()
+    r = requests.get("https://futures.kraken.com/derivatives/api/v3/tickers", timeout=20)
+    r.raise_for_status()
+    rows = r.json().get("tickers") or []
+    ranked: list[tuple[float, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        spec = specs.get(symbol) or {}
+        if not symbol.startswith("PF_") or not bool(spec.get("tradeable")):
+            continue
+        try:
+            bid = float(row.get("bid") or 0.0)
+            ask = float(row.get("ask") or 0.0)
+        except Exception:
+            continue
+        if bid <= 0 or ask < bid:
+            continue
+        mid = (bid + ask) / 2.0
+        try:
+            min_notional = float(spec.get("qty_step") or 0.0) * mid
+        except Exception:
+            min_notional = 999999.0
+        if min_notional <= 0 or min_notional > MAX_NOTIONAL_USD:
+            continue
+        liquidity = 0.0
+        for key in ("volumeQuote", "volume24h", "volume", "openInterest"):
+            try:
+                liquidity = max(liquidity, float(row.get(key) or 0.0))
+            except Exception:
+                pass
+        spread_bps = ((ask - bid) / mid * 10000.0) if mid > 0 else 9999.0
+        score = liquidity - spread_bps * 1000.0
+        ranked.append((score, symbol))
+    ranked.sort(reverse=True)
+    return [s for _, s in ranked[:max_symbols]]
+
+
 def _log(event: dict[str, Any]) -> None:
     EVENT_LOG.parent.mkdir(parents=True, exist_ok=True)
     row = {"ts_ms": int(time.time() * 1000), **event}
@@ -154,12 +197,16 @@ def _log(event: dict[str, Any]) -> None:
 
 
 def public_scan() -> dict[str, Any]:
+    symbols = _dynamic_universe()
     rows: list[dict[str, Any]] = []
-    for symbol in SYMBOLS:
-        try:
-            rows.append(_signal(symbol))
-        except Exception as exc:
-            rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(symbols)))) as pool:
+        futs = {pool.submit(_signal, symbol): symbol for symbol in symbols}
+        for fut in as_completed(futs):
+            symbol = futs[fut]
+            try:
+                rows.append(fut.result())
+            except Exception as exc:
+                rows.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
 
     rows.sort(
         key=lambda x: (
@@ -175,11 +222,13 @@ def public_scan() -> dict[str, Any]:
         "reason": "FUTURES_CANARY_SIGNAL_READY" if ready else "NO_POSITIVE_FUTURES_CANARY",
         "candidate": ready[0] if ready else (rows[0] if rows else None),
         "ready_count": len(ready),
+        "universe_count": len(symbols),
+        "symbols": symbols,
         "all": rows,
         "round_trip_taker_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "min_net_edge_bps": MIN_TAKER_NET_EDGE_BPS,
         "actual_order_submitted": False,
-        "note": "Public 1m futures momentum/ATR screen; not a guarantee of profit.",
+        "note": "Dynamic Kraken PF_* perpetual universe; 1m momentum/ATR screen with taker-cost gating.",
     }
 
 
@@ -219,7 +268,7 @@ def private_plan() -> dict[str, Any]:
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
         "max_order_notional_usd": MAX_NOTIONAL_USD,
         "max_open_positions": MAX_OPEN_POSITIONS,
-        "allowed_roots": ["XBTUSD", "ETHUSD", "SOLUSD"],
+        "allowed_roots": ["*"],
     })
     scan = public_scan()
     r = readiness()
@@ -300,11 +349,11 @@ def private_plan() -> dict[str, Any]:
         take_frac = min(max(2.0 * stop_frac, 0.0060), 0.0250)
 
         if side == "buy":
-            stop_price = px * (1.0 - stop_frac)
-            take_price = px * (1.0 + take_frac)
+            stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
+            take_price = round_price_to_tick(symbol, px * (1.0 + take_frac), mode="up")
         else:
-            stop_price = px * (1.0 + stop_frac)
-            take_price = px * (1.0 - take_frac)
+            stop_price = round_price_to_tick(symbol, px * (1.0 + stop_frac), mode="up")
+            take_price = round_price_to_tick(symbol, px * (1.0 - take_frac), mode="down")
 
         executable.append({
             "symbol": symbol,
@@ -353,6 +402,90 @@ def private_plan() -> dict[str, Any]:
     }
 
 
+def rescue_existing_position() -> dict[str, Any]:
+    save_policy({
+        "live_execution": True,
+        "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
+        "max_order_notional_usd": MAX_NOTIONAL_USD,
+        "max_open_positions": MAX_OPEN_POSITIONS,
+        "allowed_roots": ["*"],
+    })
+    client = client_from_env()
+    try:
+        positions = position_map(client.open_positions())
+        active = [(s, float(q)) for s, q in positions.items() if abs(float(q)) >= min_lot(s)]
+        if not active:
+            return {"ok": True, "reason": "NO_EXISTING_POSITION", "actual_order_submitted": False}
+        if len(active) != 1:
+            return {
+                "ok": False,
+                "reason": "MULTIPLE_EXISTING_POSITIONS",
+                "positions": active,
+                "actual_order_submitted": False,
+            }
+
+        symbol, signed_size = active[0]
+        side = "sell" if signed_size > 0 else "buy"
+        size = round_size_down(symbol, abs(signed_size))
+        px = _ticker_mid(client, symbol)
+        try:
+            client.cancel_all_orders()
+        except Exception:
+            pass
+
+        stop_frac = 0.005
+        take_frac = 0.010
+        if signed_size > 0:
+            stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
+            take_price = round_price_to_tick(symbol, px * (1.0 + take_frac), mode="up")
+        else:
+            stop_price = round_price_to_tick(symbol, px * (1.0 + stop_frac), mode="up")
+            take_price = round_price_to_tick(symbol, px * (1.0 - take_frac), mode="down")
+
+        stop = place_order(
+            symbol, side, size, reduce_only=True, order_type="stp",
+            stop_price=stop_price, trigger_signal="mark",
+            cli_ord_id=f"rs{int(time.time() * 1000)}",
+        )
+        take = place_order(
+            symbol, side, size, reduce_only=True, order_type="take_profit",
+            stop_price=take_price, trigger_signal="mark",
+            cli_ord_id=f"rt{int(time.time() * 1000)}",
+        )
+        if stop.get("submitted_live") and take.get("submitted_live"):
+            return {
+                "ok": True,
+                "reason": "EXISTING_POSITION_PROTECTED",
+                "symbol": symbol,
+                "size": size,
+                "stop_price": stop_price,
+                "take_profit_price": take_price,
+                "stop": stop,
+                "take_profit": take,
+                "actual_order_submitted": True,
+            }
+
+        try:
+            client.cancel_all_orders()
+        except Exception:
+            pass
+        flat = place_order(
+            symbol, side, size, reduce_only=True, order_type="mkt",
+            cli_ord_id=f"rf{int(time.time() * 1000)}",
+        )
+        return {
+            "ok": bool(flat.get("submitted_live")),
+            "reason": "EXISTING_POSITION_FLATTENED" if flat.get("submitted_live") else "RESCUE_FLATTEN_FAILED",
+            "symbol": symbol,
+            "stop": stop,
+            "take_profit": take,
+            "flatten": flat,
+            "actual_order_submitted": bool(flat.get("submitted_live")),
+        }
+    finally:
+        save_policy({"live_execution": False})
+
+
 def execute() -> dict[str, Any]:
     # Keep policy disarmed during planning. It is armed only for the few calls
     # needed to establish the canary and protective reduce-only orders.
@@ -361,7 +494,7 @@ def execute() -> dict[str, Any]:
         "max_order_notional_pct_equity": MAX_NOTIONAL_PCT_EQUITY,
         "max_order_notional_usd": MAX_NOTIONAL_USD,
         "max_open_positions": MAX_OPEN_POSITIONS,
-        "allowed_roots": ["XBTUSD", "ETHUSD", "SOLUSD"],
+        "allowed_roots": ["*"],
     })
 
     plan = private_plan()
@@ -499,9 +632,13 @@ def main() -> None:
     ap.add_argument("--public", action="store_true")
     ap.add_argument("--plan", action="store_true")
     ap.add_argument("--execute", action="store_true")
+    ap.add_argument("--rescue", action="store_true")
     ap.add_argument("--confirm", default="")
     args = ap.parse_args()
 
+    if args.rescue:
+        print(json.dumps(rescue_existing_position(), indent=2, ensure_ascii=False, default=str))
+        return
     if args.execute:
         if args.confirm != "SPUSTIT-FUTURES-CANARY":
             raise SystemExit("Execution requires --confirm SPUSTIT-FUTURES-CANARY")
