@@ -1,7 +1,18 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-Write-Host "IMPULSE MAX 5K - MARKET NEUTRAL RELATIVE VALUE" -ForegroundColor Cyan
+# Keep the local checkout current without overwriting local edits.
+try {
+    git pull --ff-only
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Git pull neprošel; startuji existující lokální checkout." -ForegroundColor Yellow
+    }
+}
+catch {
+    Write-Host "Git pull nelze provést; startuji existující lokální checkout." -ForegroundColor Yellow
+}
+
+Write-Host "IMPULSE MAX 5K V4.4 - USDC SEQUENTIAL HUNTER + RELATIVE VALUE" -ForegroundColor Cyan
 Write-Host "PAPER / RESEARCH only. LIVE orders are disabled." -ForegroundColor Yellow
 
 $oldListener = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue |
