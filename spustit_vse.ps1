@@ -341,6 +341,12 @@ while ($true) {
         Write-Host ""
         Write-Host "Kapitál / marže dostupná systému:" -ForegroundColor Cyan
         & $Python "capital_sources.py" --report $ReadinessJson
+        try {
+            & $Python "kraken_inventory.py"
+        }
+        catch {
+            Write-Host "Kraken inventory se nepodařilo vytvořit, readiness report zůstává platný." -ForegroundColor Yellow
+        }
         break
     }
 
