@@ -123,8 +123,13 @@ def features(df: pd.DataFrame, fast: int = 8, slow: int = 24, zwin: int = 30, at
     tr = pd.concat([(x.high - x.low), (x.high - prev).abs(), (x.low - prev).abs()], axis=1).max(axis=1)
     x["atr"] = tr.rolling(atrn).mean()
     x["atr_med"] = x["atr"].rolling(60).median()
-    medv = x.volume.rolling(30).median().replace(0, np.nan)
-    x["rv"] = x.volume / medv
+    medv = x.volume.rolling(30).median()
+    x["rv"] = np.where(
+        medv > 0,
+        x.volume / medv,
+        1.0,
+    )
+    x["rv"] = pd.Series(x["rv"], index=x.index).replace([np.inf, -np.inf], np.nan).fillna(1.0)
     x["hh"] = x.high.shift(1).rolling(20).max()
     x["ll"] = x.low.shift(1).rolling(20).min()
     return x
