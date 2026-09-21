@@ -41,12 +41,13 @@ def state_key_from_row(row: pd.Series | dict[str, Any]) -> str:
     pressure = ternary(float(get("pressure_bps", 0.0)), 0.30)
     ret = ternary(float(get("ret5_bps", 0.0)), 1.50)
     btc = ternary(float(get("btc_ret5_bps", 0.0)), 1.50)
+    relative = ternary(float(get("relative_ret5_bps", 0.0)), 1.50)
     f = float(get("flow10", 0.0))
     r = float(get("ret5_bps", 0.0))
     # Pressure without movement: aggressive flow that price has not yet followed.
     absorption = ternary(f, 0.35) if abs(r) < 1.25 else 0
     vol = 1 if float(get("vol10_bps", 0.0)) > 3.0 else 0
-    return f"o{obi}|f{flow}|m{pressure}|r{ret}|b{btc}|a{absorption}|v{vol}"
+    return f"o{obi}|f{flow}|m{pressure}|r{ret}|b{btc}|x{relative}|a{absorption}|v{vol}"
 
 
 def load_snapshots(db_path: Path = DB_PATH, max_rows: int = MAX_ROWS) -> pd.DataFrame:
