@@ -213,3 +213,7 @@ The neutral V2 runner can use a faster PAPER-only profile: 5 s scanning, 1.5-sig
 
 ### GBP/JPY Breakout Lab
 A separate PAPER research lane for GBP/JPY. It keeps TECHNICAL and NEWS hypotheses separate, stores observed broker bid/ask quotes in data/gbpjpy_breakout.db, tracks actual spread observations, and requires explicit news timestamps. It intentionally does not invent slippage, win-rate, or broker-liquidity statistics. Until a real broker feed is connected it remains DATA_COLLECTION_ONLY. LIVE orders are disabled.
+
+
+### RV LIVE CANARY FINAL VALIDATION
+This marker exists to run full CI against the final hardened canary implementation, including persisted OPENING/OPEN_ERROR states and immediate reduce-only flatten attempts on explicit DISARM.
