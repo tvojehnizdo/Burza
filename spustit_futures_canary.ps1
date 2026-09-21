@@ -29,11 +29,23 @@ $env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $pair[1]
 try {
     Write-Host ""
     Write-Host "FUTURES CANARY - PRIVATE PLAN" -ForegroundColor Cyan
-    & $Python futures_canary.py --plan
+    $planJson = & $Python futures_canary.py --plan
     if ($LASTEXITCODE -ne 0) { throw "Private futures canary plan selhal." }
+    $planJson | Write-Host
+    $plan = ($planJson -join [Environment]::NewLine) | ConvertFrom-Json
+
+    if (-not $plan.ready -or [string]$plan.reason -ne "FUTURES_CANARY_EXECUTABLE") {
+        Write-Host ""
+        Write-Host ("LIVE NEODESLAN: plan neni executable. reason=" + [string]$plan.reason) -ForegroundColor Yellow
+        exit 2
+    }
 
     Write-Host ""
-    Write-Host "Pokud plan neni ready=true, nic nespoustej." -ForegroundColor Yellow
+    Write-Host ("READY: " + $plan.candidate.symbol + " " + $plan.candidate.side +
+        " | notional ~$" + [math]::Round([double]$plan.candidate.estimated_notional_usd, 2) +
+        " | stop=" + [math]::Round([double]$plan.candidate.stop_price, 4) +
+        " | take=" + [math]::Round([double]$plan.candidate.take_profit_price, 4)) -ForegroundColor Green
+
     $confirm = Read-Host "Pro odeslani prvniho LIVE futures canary napis presne SPUSTIT FUTURES CANARY"
     if ($confirm -ne "SPUSTIT FUTURES CANARY") {
         Write-Host "LIVE order nebyl odeslan." -ForegroundColor Yellow
