@@ -61,3 +61,23 @@ The live 30-second microstructure edge cannot be reconstructed from 1-minute OHL
 - a positive short sample is not accepted as proof; the engine requires repeated train/validation agreement
 
 V4's job is not to manufacture green backtests. Its job is to find repeatable states that remain positive after costs and reject everything else.
+
+
+## Private Kraken readiness
+
+Run this in a second PowerShell window while V4 keeps collecting market data:
+
+    cd C:\Burza
+    git pull
+    .\prepare_private.ps1
+
+The readiness script:
+- loads the Kraken key/secret locally without printing either value
+- calls GetApiKeyInfo
+- requires Query Funds, Query Open Orders/Trades and Modify Trades
+- fails if Withdraw Funds is enabled
+- reads balances, margin/trade balance, open orders and open positions
+- sends one AddOrder request with validate=true and leverage=2 to test the margin order path without entering the matching engine
+- reports actual_order_submitted=false
+
+This step does not place a live trade. It establishes whether the account/API path is technically ready and whether the no-withdraw boundary is enforced by the API key itself.
