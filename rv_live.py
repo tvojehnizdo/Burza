@@ -559,6 +559,87 @@ def daemon(path: Path = RV_DB_PATH) -> None:
         time.sleep(float(load_policy()["poll_s"]))
 
 
+def selftest() -> dict[str, Any]:
+    test_db = Path("data/rv_live_selftest.db")
+    if test_db.exists():
+        try:
+            test_db.unlink()
+        except Exception:
+            pass
+    init_live_db(test_db)
+
+    ids: list[int] = []
+    with sqlite3.connect(test_db) as con:
+        for i in range(20):
+            pnl = 12.0 if i % 2 == 0 else -5.0
+            net_bps = 16.0 if pnl > 0 else -7.0
+            cur = con.execute(
+                """INSERT INTO rv_paper_pairs(
+                    opened_ms,closed_ms,root,perp_symbol,fixed_symbol,direction,
+                    notional_per_leg_czk,entry_perp_px,entry_fixed_px,
+                    entry_edge_bps,entry_funding_bps_h,neutral_units,
+                    pnl_czk,net_pnl_bps,exit_reason,status
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    1_000_000 + i * 10_000,
+                    1_005_000 + i * 10_000,
+                    "XBTUSD",
+                    "PF_XBTUSD",
+                    "FF_XBTUSD_271231",
+                    "LONG_PERP_SHORT_FIXED",
+                    100.0,
+                    100.0,
+                    100.5,
+                    10.0,
+                    0.0,
+                    0.995,
+                    pnl,
+                    net_bps,
+                    "SELFTEST",
+                    "CLOSED",
+                ),
+            )
+            ids.append(int(cur.lastrowid))
+
+        con.execute(
+            """INSERT INTO rv_live_pairs(
+                paper_id,opened_ms,root,perp_symbol,fixed_symbol,direction,
+                size_base,target_notional_usd,status,error
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                ids[0], 2_000_000, "XBTUSD", "PF_XBTUSD", "FF_XBTUSD_271231",
+                "LONG_PERP_SHORT_FIXED", 0.0001, 10.0, "CLOSE_ERROR", "synthetic",
+            ),
+        )
+
+    evidence = paper_evidence(test_db)
+    retry_targets = _closed_live_targets(test_db)
+    lot_checks = {
+        "btc": round_size_down("PF_XBTUSD", 0.00019) == 0.0001,
+        "eth": round_size_down("PF_ETHUSD", 0.0019) == 0.001,
+        "sol": round_size_down("PF_SOLUSD", 0.019) == 0.01,
+    }
+    checks = {
+        "twenty_closed_pairs": evidence["closed_pairs"] == 20,
+        "positive_net_pnl": evidence["net_pnl_czk"] > 0,
+        "profit_factor_above_floor": evidence["profit_factor"] > 1.2,
+        "drawdown_below_five_pct": evidence["max_drawdown_pct"] < 5.0,
+        "close_error_is_retried": len(retry_targets) == 1 and retry_targets[0]["paper_id"] == ids[0],
+        "lot_rounding": all(lot_checks.values()),
+        "live_default_disarmed": not bool(load_policy().get("live_execution", False)),
+    }
+    try:
+        test_db.unlink()
+    except Exception:
+        pass
+    return {
+        "ok": all(checks.values()),
+        "checks": checks,
+        "evidence": evidence,
+        "lot_checks": lot_checks,
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--readiness", action="store_true")
