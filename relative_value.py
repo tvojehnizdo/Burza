@@ -13,7 +13,7 @@ from typing import Any
 import requests
 
 BASE = "https://futures.kraken.com/derivatives/api/v3"
-DB_PATH = Path(os.getenv("RV_DB", "data/relative_value.db"))
+DB_PATH = Path(os.getenv("RV_DB", "data/relative_value_v2.db"))
 SCAN_INTERVAL_S = float(os.getenv("RV_SCAN_INTERVAL_S", "15"))
 MAKER_FEE_BPS = float(os.getenv("RV_MAKER_FEE_BPS", os.getenv("KRAKEN_FUTURES_MAKER_BPS", "2")))
 ADVERSE_BUFFER_BPS = float(os.getenv("RV_ADVERSE_BUFFER_BPS", "4"))
