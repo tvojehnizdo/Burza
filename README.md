@@ -250,3 +250,6 @@ Validates compile plus pure exit-rule selftests for quick-profit, small-profit, 
 
 ### Live futures batch validation
 Validates the one-confirmation live futures batch launcher, protected entries, manager handoff, 50% equity kill-switch, and PowerShell syntax.
+
+### 22 USD loss-budget validation
+Validates the 22 USD allocated-capital ceiling and 50% (max 11 USD) live-manager kill-switch configuration.
