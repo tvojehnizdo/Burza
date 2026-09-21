@@ -65,6 +65,19 @@ function Load-OpenAIKey {
     } catch { return $null }
 }
 
+function Test-OpenAIKey([Security.SecureString]$Key) {
+    $plain = Secure-ToPlain $Key
+    if ([string]::IsNullOrWhiteSpace($plain)) { return $false }
+    try {
+        $headers = @{ Authorization = "Bearer $plain" }
+        $null = Invoke-RestMethod -Uri "https://api.openai.com/v1/models" -Headers $headers -Method Get -TimeoutSec 20
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 if (-not (Test-Path $Python)) {
     py -m venv .venv
 }
@@ -92,16 +105,31 @@ if (Test-Path $FuturesStore) {
 }
 
 $oa = Load-OpenAIKey
-if (-not $oa) {
+if ($oa -and -not (Test-OpenAIKey $oa)) {
+    Write-Host "Ulozeny OpenAI API key je neplatny nebo zruseny. Odstranuji pouze lokalni sifrovanou kopii a vyzadam novy." -ForegroundColor Yellow
+    Remove-Item $OpenAIStore -Force -ErrorAction SilentlyContinue
+    $oa = $null
+}
+
+while (-not $oa) {
     Write-Host ""
-    Write-Host "OpenAI API key pro lokální AI Supervisor není uložen." -ForegroundColor Yellow
-    Write-Host "Vlož ho pouze sem do PowerShellu; do chatu ho neposílej." -ForegroundColor Yellow
-    $oa = Read-Host "OPENAI_API_KEY" -AsSecureString
-    if ((Secure-ToPlain $oa).Length -lt 20) { throw "OpenAI API key looks incomplete." }
-    $save = Read-Host "Uložit OpenAI key lokálně šifrovaně přes Windows DPAPI? [A/n]"
+    Write-Host "OpenAI API key pro lokalni AI Supervisor chybi nebo neni platny." -ForegroundColor Yellow
+    Write-Host "Vloz ho pouze sem do PowerShellu; do chatu ho neposilej." -ForegroundColor Yellow
+    $candidate = Read-Host "OPENAI_API_KEY" -AsSecureString
+    if ((Secure-ToPlain $candidate).Length -lt 20) {
+        Write-Host "OpenAI API key vypada neuplne. Zkus znovu." -ForegroundColor Red
+        continue
+    }
+    Write-Host "Overuji OpenAI API key..." -ForegroundColor Cyan
+    if (-not (Test-OpenAIKey $candidate)) {
+        Write-Host "OpenAI API key nebyl API prijat. Zkontroluj, ze jde o aktivni Project API key." -ForegroundColor Red
+        continue
+    }
+    $oa = $candidate
+    $save = Read-Host "Ulozit OpenAI key lokalne sifrovane pres Windows DPAPI? [A/n]"
     if ([string]::IsNullOrWhiteSpace($save) -or $save.Trim().ToUpperInvariant() -in @("A","Y")) {
         Save-OpenAIKey $oa
-        Write-Host "OpenAI key uložen šifrovaně: $OpenAIStore" -ForegroundColor Green
+        Write-Host "OpenAI key ulozen sifrovane: $OpenAIStore" -ForegroundColor Green
     }
 }
 $env:OPENAI_API_KEY = Secure-ToPlain $oa
