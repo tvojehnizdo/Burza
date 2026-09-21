@@ -89,6 +89,28 @@ def init_db(path: Path = DB_PATH) -> None:
             CREATE INDEX IF NOT EXISTS idx_paper_status
                 ON paper_trades(status, closed_ms);
 
+            CREATE TABLE IF NOT EXISTS shadow_paper_trades(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                opened_ms INTEGER NOT NULL,
+                closed_ms INTEGER,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                horizon_s INTEGER NOT NULL,
+                entry REAL NOT NULL,
+                exit REAL,
+                notional_czk REAL NOT NULL,
+                signal_edge_bps REAL NOT NULL,
+                signal_score REAL NOT NULL,
+                cost_bps REAL NOT NULL,
+                pnl_czk REAL,
+                net_bps REAL,
+                state_key TEXT NOT NULL,
+                signal_kind TEXT NOT NULL DEFAULT 'UNVALIDATED_STATE',
+                status TEXT NOT NULL DEFAULT 'OPEN'
+            );
+            CREATE INDEX IF NOT EXISTS idx_shadow_paper_status
+                ON shadow_paper_trades(status, closed_ms);
+
             CREATE TABLE IF NOT EXISTS runtime_meta(
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
