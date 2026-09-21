@@ -392,9 +392,23 @@ def open_live_pair(row: dict[str, Any], path: Path = RV_DB_PATH) -> dict[str, An
         _event("OPEN", out)
         return out
     except Exception as exc:
+        # Last-resort cleanup: compare with the pre-trade snapshot and flatten
+        # every delta attributable to this attempted pair. This is intentionally
+        # limited to the two symbols selected by the bridge.
+        cleanup = None
+        try:
+            after_error = position_map(client.open_positions())
+            perp_delta_err = _delta(before, after_error, perp)
+            fixed_delta_err = _delta(before, after_error, fixed)
+            cleanup = {
+                "perp": _flatten_delta(perp, perp_delta_err) if abs(perp_delta_err) > 0 else None,
+                "fixed": _flatten_delta(fixed, fixed_delta_err) if abs(fixed_delta_err) > 0 else None,
+            }
+        except Exception as cleanup_exc:
+            cleanup = {"error": f"{type(cleanup_exc).__name__}: {cleanup_exc}"}
         _event("OPEN_ERROR", {
             "paper_id": row["paper_id"], "error": f"{type(exc).__name__}: {exc}",
-            "compensation": compensation,
+            "compensation": compensation, "cleanup": cleanup,
         })
         raise
 
@@ -450,18 +464,40 @@ def run_once(path: Path = RV_DB_PATH) -> dict[str, Any]:
     rdy = readiness(path)
     if not rdy.get("live_execution"):
         return {"active": False, "readiness": rdy, "opened": [], "closed": []}
-    if not rdy.get("safe_to_arm"):
-        set_live_execution(False, path)
-        return {"active": False, "auto_disarmed": True, "readiness": rdy, "opened": [], "closed": []}
 
+    # Existing live exposure is always managed before evaluating any new-entry
+    # evidence gate. A deteriorating paper metric must never prevent an exit.
+    managed_before = _managed_open(path)
     closed: list[dict[str, Any]] = []
     for row in _closed_live_targets(path):
         closed.append(close_live_pair(row, path))
 
+    managed_after = _managed_open(path)
+    if managed_after:
+        return {
+            "active": True,
+            "management_only": True,
+            "readiness": readiness(path),
+            "opened": [],
+            "closed": closed,
+        }
+
+    rdy_after_close = readiness(path)
+    if not rdy_after_close.get("safe_to_arm"):
+        # With no managed positions remaining it is safe to disarm and block
+        # further entries until all evidence/account gates pass again.
+        set_live_execution(False, path)
+        return {
+            "active": False,
+            "auto_disarmed": True,
+            "readiness": rdy_after_close,
+            "opened": [],
+            "closed": closed,
+        }
+
     opened: list[dict[str, Any]] = []
-    if not _managed_open(path):
-        for row in _open_paper_candidates(path)[:1]:
-            opened.append(open_live_pair(row, path))
+    for row in _open_paper_candidates(path)[:1]:
+        opened.append(open_live_pair(row, path))
 
     return {"active": True, "readiness": readiness(path), "opened": opened, "closed": closed}
 
