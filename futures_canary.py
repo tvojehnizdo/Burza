@@ -40,6 +40,7 @@ ROUND_TRIP_TAKER_COST_BPS = 2.0 * (
     TAKER_FEE_BPS_PER_SIDE + SLIPPAGE_BPS_PER_SIDE + EXEC_BUFFER_BPS_PER_SIDE
 )
 MIN_TAKER_NET_EDGE_BPS = 5.0
+BACKUP_TAKE_PROFIT_BPS = 300.0
 TARGET_NOTIONAL_USD = 2.25
 MAX_NOTIONAL_USD = 3.0
 MAX_NOTIONAL_PCT_EQUITY = 35.0
@@ -477,7 +478,9 @@ def private_plan() -> dict[str, Any]:
         atr_frac = max(float(p.get("atr_pct") or 0.0) / 100.0, 0.0001)
         expected_frac = max(float(p.get("expected_move_proxy_bps") or 0.0) / 10000.0, 0.0)
         stop_frac = min(max(1.5 * atr_frac, 0.0035), 0.0080)
-        take_frac = min(max(1.25 * stop_frac, 1.10 * expected_frac, 0.0045), 0.0120)
+        # A distant exchange-side TP is only a fail-safe. Normal profitable
+        # exits are managed by the tightening ratchet trailing logic.
+        take_frac = BACKUP_TAKE_PROFIT_BPS / 10000.0
 
         if side == "buy":
             stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
