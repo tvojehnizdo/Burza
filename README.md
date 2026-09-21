@@ -232,3 +232,6 @@ The neutral profile now records a 12-pair spot microstructure universe and runs 
 
 ### Executable candidate validation
 Dashboard exposes a read-only executable-candidate gate that requires a current cost-positive state, Kraken pair minimums, and sufficient USD/USDC balance. It never submits an order.
+
+### Fast canary validation
+A fast 1m OHLC/momentum/ATR scanner across liquid USD/USDC markets provides a fallback executable candidate when learned microstructure has no cost-positive state. It remains read-only and never submits an order.
