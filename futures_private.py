@@ -9,6 +9,7 @@ import math
 import os
 import time
 import urllib.parse
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,11 @@ class KrakenFutures:
             r = self.s.get(url, params=params, headers=headers, timeout=20)
         else:
             r = self.s.post(url, data=post_data, headers={**headers, "Content-Type": "application/x-www-form-urlencoded"}, timeout=20)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as exc:
+            detail = (r.text or "").strip().replace("\n", " ")[:1200]
+            raise RuntimeError(f"Kraken Futures HTTP {r.status_code} on {url_path}: {detail}") from exc
         body = r.json()
         if body.get("result") == "error":
             raise RuntimeError(str(body.get("error") or body.get("errors") or body))
@@ -181,7 +186,7 @@ def load_policy() -> dict[str, Any]:
     p["max_order_notional_usd"] = min(max(float(p.get("max_order_notional_usd", 15.0)), 1.0), 100.0)
     p["max_open_positions"] = min(max(int(p.get("max_open_positions", 2)), 1), 6)
     p["max_portfolio_notional_usd"] = min(max(float(p.get("max_portfolio_notional_usd", 10.0)), 1.0), 100.0)
-    p["max_portfolio_notional_pct_equity"] = min(max(float(p.get("max_portfolio_notional_pct_equity", 50.0)), 5.0), 80.0)
+    p["max_portfolio_notional_pct_equity"] = min(max(float(p.get("max_portfolio_notional_pct_equity", 50.0)), 5.0), 95.0)
     p["deadman_timeout_s"] = min(max(int(p.get("deadman_timeout_s", 60)), 20), 120)
     allowed = [str(x).upper() for x in (p.get("allowed_roots") or DEFAULT_POLICY["allowed_roots"])]
     if "*" in allowed:
@@ -422,26 +427,44 @@ def tick_size(symbol: str) -> float:
     return tick
 
 
-def round_price_to_tick(symbol: str, price: float, mode: str = "nearest") -> float:
-    tick = tick_size(symbol)
-    units = float(price) / tick
+def _decimal_places(step: float) -> int:
+    if float(step) <= 0:
+        raise ValueError("step must be positive")
+    exponent = Decimal(str(step)).normalize().as_tuple().exponent
+    return max(0, -int(exponent))
+
+
+def _round_to_step(value: float, step: float, mode: str = "nearest") -> float:
+    if float(step) <= 0:
+        raise ValueError("step must be positive")
+    units = float(value) / float(step)
     if mode == "down":
         units = math.floor(units + 1e-12)
     elif mode == "up":
         units = math.ceil(units - 1e-12)
     else:
         units = round(units)
-    value = units * tick
-    decimals = max(0, len(str(tick).split(".")[1].rstrip("0")) if "." in str(tick) else 0)
-    return round(value, decimals)
+    rounded = units * float(step)
+    return round(rounded, _decimal_places(step))
+
+
+def round_price_to_tick(symbol: str, price: float, mode: str = "nearest") -> float:
+    return _round_to_step(float(price), tick_size(symbol), mode)
 
 
 def round_size_down(symbol: str, size: float) -> float:
-    step = min_lot(symbol)
-    units = math.floor((float(size) + 1e-15) / step)
-    rounded = units * step
-    decimals = max(0, len(str(step).split(".")[1].rstrip("0")) if "." in str(step) else 0)
-    return round(rounded, decimals)
+    return _round_to_step(float(size), min_lot(symbol), "down")
+
+
+def precision_selftest() -> dict[str, Any]:
+    checks = {
+        "scientific_tick_decimals": _decimal_places(1e-5) == 5,
+        "doge_like_down": _round_to_step(0.098703, 1e-5, "down") == 0.0987,
+        "doge_like_up": _round_to_step(0.102119, 1e-5, "up") == 0.10212,
+        "scientific_qty_step": _round_to_step(0.0001239, 1e-5, "down") == 0.00012,
+        "integer_tick": _round_to_step(101.4, 1.0, "nearest") == 101.0,
+    }
+    return {"ok": all(checks.values()), "checks": checks}
 
 def portfolio_notional_usd(client: KrakenFutures, positions_payload: dict[str, Any] | None = None) -> float:
     positions_payload = positions_payload or client.open_positions()
