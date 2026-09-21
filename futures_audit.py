@@ -376,6 +376,13 @@ def _md(report: dict[str, Any]) -> str:
     else:
         lines.append("No completed trades in current audit window.")
 
+    lines += ["", "## Audit diagnostics", ""]
+    if report.get("audit_anomalies"):
+        for item in report["audit_anomalies"]:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- No audit reconstruction anomaly detected.")
+
     lines += ["", "## Recommendations", ""]
     for r in report["recommendations"]:
         lines.append(f"- {r}")
@@ -393,13 +400,28 @@ def main() -> None:
     canary_events = _load_jsonl(CANARY_LOG)
 
     since_ms = _latest_session_start(auto_events, state)
-    exchange_events = _position_events(client, max(0, since_ms - 120_000))
-    signals = _signal_events(canary_events, since_ms - 120_000)
-    trades = _trade_roundtrips(exchange_events, signals)
+    history_since_ms = max(0, since_ms - 24 * 3600 * 1000)
+    exchange_events = _position_events(client, history_since_ms)
+    signals = _signal_events(canary_events, history_since_ms)
+    all_trades = _trade_roundtrips(exchange_events, signals)
+    trades = [
+        t for t in all_trades
+        if int(t.get("close_ts_ms") or 0) >= since_ms
+    ]
     exit_counts, exit_rows = _exit_reason_map(auto_events, since_ms)
     _attach_exit_reasons(trades, exit_rows)
 
     summary = _summary(trades)
+    anomalies: list[str] = []
+    if sum(exit_counts.values()) > 0 and int(summary.get("completed_trades") or 0) == 0:
+        anomalies.append(
+            "Local AUTO_EXIT events exist but no completed Kraken round-trip was reconstructed."
+        )
+    if not exchange_events:
+        anomalies.append(
+            "Kraken position-event history returned zero events for the extended audit window."
+        )
+
     current_equity = _num(r.get("equity_usd"))
     start_equity = _num(state.get("session_start_equity"), current_equity)
 
@@ -412,11 +434,21 @@ def main() -> None:
         "open_position_count": int(r.get("open_position_count") or 0),
         "open_positions": r.get("open_positions"),
         "open_orders": r.get("open_orders"),
+        "history_since_ms": history_since_ms,
         "exchange_position_events": len(exchange_events),
+        "exchange_first_event_ts_ms": min(
+            [int(e.get("timestamp") or e.get("fillTime") or 0) for e in exchange_events if int(e.get("timestamp") or e.get("fillTime") or 0) > 0],
+            default=None,
+        ),
+        "exchange_last_event_ts_ms": max(
+            [int(e.get("timestamp") or e.get("fillTime") or 0) for e in exchange_events if int(e.get("timestamp") or e.get("fillTime") or 0) > 0],
+            default=None,
+        ),
         "canary_signal_events": len(signals),
         "summary": summary,
         "exit_reasons": dict(exit_counts),
         "trades": trades,
+        "audit_anomalies": anomalies,
         "recommendations": _recommendations(summary, trades, exit_counts),
     }
 
@@ -431,6 +463,8 @@ def main() -> None:
         "report_md": str(md_path),
         "summary": summary,
         "exit_reasons": dict(exit_counts),
+        "exchange_position_events": report["exchange_position_events"],
+        "audit_anomalies": report["audit_anomalies"],
         "recommendations": report["recommendations"],
         "open_position_count": report["open_position_count"],
         "equity_start_usd": report["equity_start_usd"],
