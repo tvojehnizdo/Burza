@@ -391,7 +391,7 @@ def execute() -> dict[str, Any]:
             size,
             reduce_only=False,
             order_type="mkt",
-            cli_ord_id=f"canary-entry-{int(time.time())}",
+            cli_ord_id=f"ce{int(time.time() * 1000)}",
             use_deadman=False,
         )
 
@@ -419,7 +419,7 @@ def execute() -> dict[str, Any]:
             order_type="stp",
             stop_price=float(candidate["stop_price"]),
             trigger_signal="mark",
-            cli_ord_id=f"canary-stop-{int(time.time())}",
+            cli_ord_id=f"cs{int(time.time() * 1000)}",
             use_deadman=False,
         )
         if not stop.get("submitted_live"):
@@ -433,7 +433,7 @@ def execute() -> dict[str, Any]:
             order_type="take_profit",
             stop_price=float(candidate["take_profit_price"]),
             trigger_signal="mark",
-            cli_ord_id=f"canary-tp-{int(time.time())}",
+            cli_ord_id=f"ct{int(time.time() * 1000)}",
             use_deadman=False,
         )
         if not take.get("submitted_live"):
@@ -464,7 +464,7 @@ def execute() -> dict[str, Any]:
                     close_size,
                     reduce_only=True,
                     order_type="mkt",
-                    cli_ord_id=f"canary-flat-{int(time.time())}",
+                    cli_ord_id=f"cf{int(time.time() * 1000)}",
                     use_deadman=False,
                 )
         except Exception as comp_exc:
