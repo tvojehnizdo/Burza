@@ -678,7 +678,8 @@ def status() -> dict[str, Any]:
                 "45_to_70": TRAIL_GAP_1_BPS,
                 "70_to_120": TRAIL_GAP_2_BPS,
                 "120_to_200": TRAIL_GAP_3_BPS,
-                "200_plus": TRAIL_GAP_4_BPS,
+                "200_to_300": TRAIL_GAP_4_BPS,
+                "300_plus": TRAIL_GAP_5_BPS,
             },
             "no_progress_sec": NO_PROGRESS_SEC,
             "hard_max_hold_sec": HARD_MAX_HOLD_SEC,
@@ -706,8 +707,9 @@ def selftest() -> dict[str, Any]:
         "trailing_tightens": (
             _trailing_gap_bps(50.0) > _trailing_gap_bps(80.0)
             > _trailing_gap_bps(130.0) > _trailing_gap_bps(220.0)
+            > _trailing_gap_bps(320.0)
         ),
-        "small_profit": _exit_reason(100, 36.0, 36.0) == "SMALL_PROFIT",
+        "small_profit": _exit_reason(121, 61.0, 40.0) == "SMALL_PROFIT",
         "no_progress": _exit_reason(181, 5.0, 15.0) == "NO_PROGRESS",
         "hard_max": _exit_reason(481, 100.0, 100.0) == "HARD_MAX_HOLD",
         "no_early_exit": _exit_reason(10, 100.0, 100.0) is None,
