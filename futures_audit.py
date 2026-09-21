@@ -232,6 +232,42 @@ def _trade_roundtrips(events: list[dict[str, Any]], signals: list[dict[str, Any]
     return completed
 
 
+def _event_diagnostics(events: list[dict[str, Any]]) -> dict[str, Any]:
+    position_changes = Counter()
+    update_reasons = Counter()
+    trade_types = Counter()
+    samples: list[dict[str, Any]] = []
+
+    for e in events:
+        position_changes[str(e.get("positionChange") or "missing")] += 1
+        update_reasons[str(e.get("updateReason") or "missing")] += 1
+        trade_types[str(e.get("tradeType") or "missing")] += 1
+
+    for e in events[-12:]:
+        samples.append({
+            "timestamp": e.get("timestamp"),
+            "fillTime": e.get("fillTime"),
+            "tradeable": e.get("tradeable"),
+            "oldPosition": e.get("oldPosition"),
+            "newPosition": e.get("newPosition"),
+            "positionChange": e.get("positionChange"),
+            "updateReason": e.get("updateReason"),
+            "executionPrice": e.get("executionPrice"),
+            "executionSize": e.get("executionSize"),
+            "fee": e.get("fee"),
+            "realizedPnL": e.get("realizedPnL"),
+            "realizedFunding": e.get("realizedFunding"),
+            "tradeType": e.get("tradeType"),
+        })
+
+    return {
+        "position_change_counts": dict(position_changes),
+        "update_reason_counts": dict(update_reasons),
+        "trade_type_counts": dict(trade_types),
+        "last_events": samples,
+    }
+
+
 def _exit_reason_map(events: list[dict[str, Any]], since_ms: int) -> tuple[Counter, list[dict[str, Any]]]:
     rows = []
     counts: Counter = Counter()
@@ -242,7 +278,15 @@ def _exit_reason_map(events: list[dict[str, Any]], since_ms: int) -> tuple[Count
             continue
         reason = str(e.get("exit_reason") or e.get("reason") or "UNKNOWN")
         counts[reason] += 1
-        rows.append(e)
+        rows.append({
+            "ts_ms": e.get("ts_ms"),
+            "symbol": e.get("symbol"),
+            "exit_reason": reason,
+            "result_reason": e.get("reason"),
+            "ok": e.get("ok"),
+            "pnl_bps_before_close": e.get("pnl_bps_before_close"),
+            "close_submitted_live": ((e.get("close") or {}).get("submitted_live") if isinstance(e.get("close"), dict) else None),
+        })
     return counts, rows
 
 
@@ -383,6 +427,21 @@ def _md(report: dict[str, Any]) -> str:
     else:
         lines.append("- No audit reconstruction anomaly detected.")
 
+    diag = report.get("exchange_event_diagnostics") or {}
+    lines.append(f"- Kraken position events: {report.get('exchange_position_events')}")
+    lines.append(f"- positionChange counts: {diag.get('position_change_counts')}")
+    lines.append(f"- updateReason counts: {diag.get('update_reason_counts')}")
+    lines.append(f"- tradeType counts: {diag.get('trade_type_counts')}")
+    lines.append(f"- Local AUTO_EXIT attempts: {len(report.get('local_exit_attempts') or [])}")
+
+    for row in report.get("local_exit_attempts") or []:
+        lines.append(
+            f"  - {row.get('symbol')} | exit={row.get('exit_reason')} | "
+            f"result={row.get('result_reason')} | ok={row.get('ok')} | "
+            f"submitted={row.get('close_submitted_live')} | "
+            f"pnl_bps={row.get('pnl_bps_before_close')}"
+        )
+
     lines += ["", "## Recommendations", ""]
     for r in report["recommendations"]:
         lines.append(f"- {r}")
@@ -412,6 +471,7 @@ def main() -> None:
     _attach_exit_reasons(trades, exit_rows)
 
     summary = _summary(trades)
+    exchange_diag = _event_diagnostics(exchange_events)
     anomalies: list[str] = []
     if sum(exit_counts.values()) > 0 and int(summary.get("completed_trades") or 0) == 0:
         anomalies.append(
@@ -445,6 +505,8 @@ def main() -> None:
             default=None,
         ),
         "canary_signal_events": len(signals),
+        "exchange_event_diagnostics": exchange_diag,
+        "local_exit_attempts": exit_rows,
         "summary": summary,
         "exit_reasons": dict(exit_counts),
         "trades": trades,
