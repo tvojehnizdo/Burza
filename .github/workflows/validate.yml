@@ -22,6 +22,18 @@ jobs:
       - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python v4_smoke.py | tee v4-smoke.json
       - run: python -c "import kraken_private, json; r=kraken_private.signature_selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+      - shell: pwsh
+        run: |
+          $null = [scriptblock]::Create((Get-Content -Raw ./spustit_vse.ps1))
+          Write-Host "PowerShell syntax OK"
+      - shell: pwsh
+        run: |
+          @'
+          # KRAKEN
+          $env:KRAKEN_API_KEY = "dummy-key"
+          KRAKEN_API_SECRET: "dummy-secret-xxxxxxxxxxxxxxxx"
+          '@ | Set-Content ./parser-test.env
+          python -c "import kraken_private; from pathlib import Path; v,e,c=kraken_private.parse_env_tolerant(Path('parser-test.env')); assert v['KRAKEN_API_KEY']=='dummy-key'; assert v['KRAKEN_API_SECRET'].startswith('dummy-secret'); print('Vault parser OK')"
       - run: python smoke_live.py | tee smoke-report.json
       - uses: actions/upload-artifact@v4
         with:
