@@ -7,13 +7,46 @@ $Store = "C:\TvojeHnizdo\Vault\Kraken\futures.credentials.dpapi.json"
 function Secure-ToPlain([Security.SecureString]$Secure) {
     $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+
+function Load-EncryptedPair([string]$Path) {
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    $obj = Get-Content -Raw $Path | ConvertFrom-Json
+    return @(
+        (ConvertTo-SecureString -String ([string]$obj.api_key)),
+        (ConvertTo-SecureString -String ([string]$obj.api_secret))
+    )
+}
+
+if (-not (Test-Path $Python)) {
+    throw "Python venv chybi. Spust start_v4_neutral.ps1."
+}
+
+$pair = Load-EncryptedPair $Store
+if (-not $pair) {
+    throw "Kraken Futures DPAPI credentials chybi: $Store. Spust prepare_futures.ps1."
+}
+
+$env:KRAKEN_FUTURES_API_KEY = Secure-ToPlain $pair[0]
+$env:KRAKEN_FUTURES_API_SECRET = Secure-ToPlain $pair[1]
+
+try {
     Write-Host ""
     Write-Host "FUTURES CANARY - ONE SHOT AUTO WATCH" -ForegroundColor Cyan
     Write-Host "Max 1 LIVE pozice, hard cap 3 USD, pouze XBT/ETH/SOL." -ForegroundColor Yellow
-    Write-Host "Po vstupu: reduce-only STOP + TAKE PROFIT. Pokud ochrana selze, executor zkusi okamzite zplosteni." -ForegroundColor Yellow
+    Write-Host "Po vstupu: reduce-only STOP + TAKE PROFIT." -ForegroundColor Yellow
+    Write-Host "Pokud ochrana selze, executor zkusi okamzite zplosteni." -ForegroundColor Yellow
     Write-Host ""
 
-    $arm = Read-Host "Pro jednorazove ozbrojeni a cekani na prvni executable signal napis presne ARM FUTURES CANARY"
+    $arm = Read-Host "Pro jednorazove ozbrojeni napis presne ARM FUTURES CANARY"
     if ($arm -ne "ARM FUTURES CANARY") {
         Write-Host "Neozbrojeno. Nic LIVE se neposlalo." -ForegroundColor Yellow
         exit 1
@@ -24,7 +57,8 @@ function Secure-ToPlain([Security.SecureString]$Secure) {
 
     while ((Get-Date) -lt $deadline) {
         $attempt++
-        $planJson = & $Python futures_canary.py --plan
+
+        $planJson = & $Python "futures_canary.py" --plan
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Plan selhal, opakuji za 5 s..." -ForegroundColor Yellow
             Start-Sleep -Seconds 5
@@ -47,41 +81,68 @@ function Secure-ToPlain([Security.SecureString]$Secure) {
 
         if ($plan.ready -and [string]$plan.reason -eq "FUTURES_CANARY_EXECUTABLE") {
             Write-Host ""
-            Write-Host ("FOUND #" + $attempt + ": " + $plan.candidate.symbol + " " + $plan.candidate.side +
+            Write-Host (
+                "FOUND #" + $attempt +
+                ": " + [string]$plan.candidate.symbol +
+                " " + [string]$plan.candidate.side +
                 " | notional ~$" + [math]::Round([double]$plan.candidate.estimated_notional_usd, 2) +
                 " | edge=" + [math]::Round([double]$plan.candidate.taker_net_edge_bps, 2) + " bps" +
                 " | stop=" + [math]::Round([double]$plan.candidate.stop_price, 4) +
-                " | take=" + [math]::Round([double]$plan.candidate.take_profit_price, 4)) -ForegroundColor Green
+                " | take=" + [math]::Round([double]$plan.candidate.take_profit_price, 4)
+            ) -ForegroundColor Green
 
-            $execJson = & $Python futures_canary.py --execute --confirm SPUSTIT-FUTURES-CANARY
+            $execJson = & $Python "futures_canary.py" --execute --confirm SPUSTIT-FUTURES-CANARY
+            if ($LASTEXITCODE -ne 0) {
+                throw "Futures canary execute selhal."
+            }
+
             $execJson | Write-Host
-            if ($LASTEXITCODE -ne 0) { throw "Futures canary execute selhal." }
 
             try {
-                $exec = ($execJson -join [Environment]::NewLine) | ConvertFrom-Json
+                $execObj = ($execJson -join [Environment]::NewLine) | ConvertFrom-Json
             }
             catch {
                 throw "Execute vratil necitelny JSON."
             }
 
-            if ($exec.actual_order_submitted) {
+            if ($execObj.actual_order_submitted) {
                 Write-Host ""
-                Write-Host "LIVE CANARY ODESLAN. Dalsi obchod se v tomto behu neposle." -ForegroundColor Green
+                Write-Host ("LIVE CANARY ODESLAN. reason=" + [string]$execObj.reason) -ForegroundColor Green
+                Write-Host "Dalsi obchod se v tomto behu neposle." -ForegroundColor Green
                 exit 0
             }
 
-            Write-Host ("Signal pri execute zmizel nebo nebyl proveditelny: " + [string]$exec.reason + ". Pokracuji v cekani.") -ForegroundColor Yellow
+            Write-Host (
+                "Signal pri execute zmizel nebo nebyl proveditelny: " +
+                [string]$execObj.reason +
+                ". Pokracuji v cekani."
+            ) -ForegroundColor Yellow
         }
         else {
             $best = $plan.public_scan.candidate
-            if ($best) {
-                Write-Host ("[" + (Get-Date -Format "HH:mm:ss") + "] cekam | reason=" + [string]$plan.reason +
+
+            if ($null -ne $best) {
+                $edge = 0.0
+                try {
+                    $edge = [double]$best.taker_net_edge_bps
+                }
+                catch {
+                    $edge = 0.0
+                }
+
+                Write-Host (
+                    "[" + (Get-Date -Format "HH:mm:ss") + "] cekam" +
+                    " | reason=" + [string]$plan.reason +
                     " | best=" + [string]$best.symbol +
                     " " + [string]$best.side +
-                    " | edge=" + [math]::Round([double]($best.taker_net_edge_bps), 2) + " bps") -ForegroundColor DarkGray
+                    " | edge=" + [math]::Round($edge, 2) + " bps"
+                ) -ForegroundColor DarkGray
             }
             else {
-                Write-Host ("[" + (Get-Date -Format "HH:mm:ss") + "] cekam | reason=" + [string]$plan.reason) -ForegroundColor DarkGray
+                Write-Host (
+                    "[" + (Get-Date -Format "HH:mm:ss") + "] cekam" +
+                    " | reason=" + [string]$plan.reason
+                ) -ForegroundColor DarkGray
             }
         }
 
