@@ -30,15 +30,15 @@ try {
     Write-Host ""
     Write-Host "FUTURES BOUNDED LIVE SESSION" -ForegroundColor Cyan
     Write-Host "Spusteni tohoto skriptu = schvaleni cele relace." -ForegroundColor Yellow
-    Write-Host "60 min | max 10 novych vstupu | max 4 soucasne pozice." -ForegroundColor Yellow
+    Write-Host "60 min | max 2 skutecne vstupy v jednom setupu." -ForegroundColor Yellow
     Write-Host "Cil/max 5 USD/obchod | max 4 pozice | portfolio max 20 USD / 95 % equity." -ForegroundColor Yellow
     Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
-    Write-Host "INVERSE MODE: puvodni kvalifikovany LONG -> SHORT, SHORT -> LONG." -ForegroundColor Magenta
+    Write-Host "SETUP V2: bez permanentniho INVERSE." -ForegroundColor Magenta
     Write-Host "Siroky PF trh -> top 48 prefilter / 28 deep | BASE trend/breakout | anti-chase | volatility sizing." -ForegroundColor Yellow
     Write-Host "Market breadth + recent taker flow | adaptive tempo BASE 90s / STRONG 45s / ELITE 20s." -ForegroundColor Yellow
-    Write-Host "Kvalifikace/quality zustava puvodni, obraci se pouze smer LIVE exekuce." -ForegroundColor Yellow
-    Write-Host "STOP/TP, trailing, loss brakes a circuit breakery se neobraceji." -ForegroundColor Yellow
-    Write-Host "Shadow-learning meri BASE i INVERSE vysledek 1/3/5/10 min. Korelacni pary SHADOW-only." -ForegroundColor Yellow
+    Write-Host "3m probe je SHADOW; LIVE az po 15m potvrzeni." -ForegroundColor Yellow
+    Write-Host "Po uzavreni prvniho obchodu je povolen max 1 potvrzeny reversal." -ForegroundColor Yellow
+    Write-Host "Risk ochrany zustavaji, korelacni pary jsou SHADOW-only." -ForegroundColor Yellow
     Write-Host "STOP ~45 bps | backup TP 300 bps | trailing ratchet 45+ bps, utahovani az na 6 bps." -ForegroundColor Yellow
     Write-Host ""
 
