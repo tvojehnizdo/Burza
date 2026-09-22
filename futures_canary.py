@@ -26,6 +26,8 @@ from futures_private import (
     save_policy,
 )
 
+INVERT_DIRECTION = True
+
 MAX_UNIVERSE = 28
 UNIVERSE_PREFILTER = 48
 MAX_UNIVERSE_SPREAD_BPS = 20.0
@@ -64,6 +66,15 @@ FUTURES_HISTORY = "https://futures.kraken.com/derivatives/api/v3/history"
 
 _SCAN_CACHE_TS = 0.0
 _SCAN_CACHE: dict[str, Any] | None = None
+
+
+def execution_signal_side(base_side: str) -> str:
+    side = str(base_side or "").upper()
+    if side not in {"LONG", "SHORT"}:
+        return side
+    if not INVERT_DIRECTION:
+        return side
+    return "SHORT" if side == "LONG" else "LONG"
 
 
 def _candles(symbol: str, count: int = 120) -> pd.DataFrame:
@@ -623,14 +634,23 @@ def private_plan() -> dict[str, Any]:
 
     for p in candidates:
         symbol = str(p["symbol"]).upper()
+        base_signal_side = str(p.get("side") or "").upper()
+        execution_signal = execution_signal_side(base_signal_side)
+
+        # Keep the historical qualifier intact, then trade the opposite side.
+        # This makes the new mode a clean anti-signal experiment rather than
+        # silently changing both selection and direction at once.
         micro = _recent_trade_flow(symbol)
         quality = _quality_profile(p, micro)
         if not quality.get("microstructure_ok"):
             rejected.append({
                 "symbol": symbol,
-                "reason": "MICROSTRUCTURE_OPPOSES_SIGNAL",
+                "reason": "MICROSTRUCTURE_OPPOSES_BASE_SIGNAL",
                 "signal": p,
                 "quality": quality,
+                "base_signal_side": base_signal_side,
+                "execution_signal_side": execution_signal,
+                "direction_inverted": INVERT_DIRECTION,
             })
             continue
         px = _ticker_mid(client, symbol)
@@ -656,7 +676,7 @@ def private_plan() -> dict[str, Any]:
                 "signal_net_edge_bps": p.get("taker_net_edge_bps"),
             })
             continue
-        side = "buy" if str(p.get("side")).upper() == "LONG" else "sell"
+        side = "buy" if execution_signal == "LONG" else "sell"
         try:
             pre = order_preflight(symbol, side, size, reduce_only=False, client=client)
         except Exception as exc:
@@ -704,7 +724,15 @@ def private_plan() -> dict[str, Any]:
             "take_profit_distance_pct": take_frac * 100.0,
             "taker_net_edge_bps": p.get("taker_net_edge_bps"),
             "confidence": p.get("confidence"),
-            "source_signal": p,
+            "base_signal_side": base_signal_side,
+            "execution_signal_side": execution_signal,
+            "direction_inverted": INVERT_DIRECTION,
+            "source_signal": {
+                **p,
+                "base_side": base_signal_side,
+                "execution_side": execution_signal,
+                "direction_inverted": INVERT_DIRECTION,
+            },
             "quality_score": quality["quality_score"],
             "quality_tier": quality["quality_tier"],
             "microstructure": quality,
@@ -1217,6 +1245,8 @@ def selftest() -> dict[str, Any]:
         "volatility_reduces_size": high_vol_size < low_vol_size,
         "broad_universe": UNIVERSE_PREFILTER > MAX_UNIVERSE >= 20,
         "scan_cache_positive": PUBLIC_SCAN_CACHE_SEC > 0,
+        "inverse_long_to_short": execution_signal_side("LONG") == ("SHORT" if INVERT_DIRECTION else "LONG"),
+        "inverse_short_to_long": execution_signal_side("SHORT") == ("LONG" if INVERT_DIRECTION else "SHORT"),
     }
     return {"ok": all(checks.values()), "checks": checks}
 
