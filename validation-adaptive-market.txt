@@ -1,0 +1,1 @@
+Validation marker for adaptive market breadth, taker-flow and pacing 2026-09-22.
