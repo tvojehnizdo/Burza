@@ -23,6 +23,7 @@ from futures_autopilot import (
 )
 from futures_canary import (
     ROUND_TRIP_TAKER_COST_BPS,
+    LIVE_MIN_QUALITY_SCORE,
     MAX_OPEN_POSITIONS,
     MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
     MAX_PORTFOLIO_NOTIONAL_USD,
@@ -42,6 +43,7 @@ from futures_setup_engine import (
     MIN_MOVE_FROM_ANCHOR_PCT,
     PROBE_EXPIRY_SEC,
     PROBE_LOOKBACK_MIN,
+    breakout_invalidated,
     compatible_direction,
     fixed_range_reversal,
     latest_completed_close,
@@ -61,6 +63,9 @@ LOSS_STREAK_HALT_AFTER = 3
 LOSS_STREAK_PAUSE_SEC = 600
 SESSION_SOFT_LOSS_PCT = 1.5
 PAIR_LIVE_ENABLED = False
+PAIR_SHADOW_SCAN_DURING_LIVE = False
+SETUP_SCAN_CANDIDATES = 10
+LIVE_REQUIRE_FRESH_MICRO_CONFIRM = True
 
 
 def _session_policy_disarm() -> None:
@@ -129,6 +134,14 @@ def _apply_loss_feedback(
     streak = int(state.get("consecutive_net_losses") or 0)
 
     for row in exits:
+        if bool(row.get("pnl_unknown")):
+            _log({
+                "event": "SESSION_EXIT_FEEDBACK_SKIPPED",
+                "symbol": row.get("symbol"),
+                "exit_reason": row.get("exit_reason"),
+                "reason": "PNL_UNKNOWN",
+            })
+            continue
         gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
         approx_net_bps = gross_bps - ROUND_TRIP_TAKER_COST_BPS
         if approx_net_bps <= 0:
@@ -179,6 +192,8 @@ def _rollback_pair_leg(client: Any, state: dict[str, Any], symbol: str, reason: 
 
 def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
+    if not PAIR_LIVE_ENABLED and not PAIR_SHADOW_SCAN_DURING_LIVE:
+        return {"ok": True, "reason": "PAIR_LIVE_AND_SESSION_SHADOW_DISABLED"}
     if not PAIR_LIVE_ENABLED:
         last_pair_scan = int(state.get("last_pair_scan_ts_ms") or 0)
         if now_ms - last_pair_scan < PAIR_SCAN_INTERVAL_SEC * 1000:
@@ -300,6 +315,60 @@ def _candidate_choices(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _candidate_live_gate(candidate: dict[str, Any]) -> tuple[bool, str]:
+    quality = float(candidate.get("quality_score") or 0.0)
+    tier = str(candidate.get("quality_tier") or "BASE").upper()
+    micro = candidate.get("microstructure") if isinstance(candidate.get("microstructure"), dict) else {}
+    source = candidate.get("source_signal") if isinstance(candidate.get("source_signal"), dict) else {}
+    if quality < LIVE_MIN_QUALITY_SCORE:
+        return False, "QUALITY_BELOW_LIVE_GATE"
+    if tier not in {"STRONG", "ELITE"}:
+        return False, "QUALITY_TIER_BELOW_STRONG"
+    if int(source.get("breadth_alignment") or 0) < 0:
+        return False, "MARKET_BREADTH_OPPOSES_SIGNAL"
+    if LIVE_REQUIRE_FRESH_MICRO_CONFIRM and not bool(micro.get("microstructure_confirmed")):
+        return False, "FRESH_MICROSTRUCTURE_NOT_CONFIRMED"
+    return True, "LIVE_GATE_OK"
+
+
+def _setup_opportunity_score(candidate: dict[str, Any], signal: dict[str, Any]) -> float:
+    source = candidate.get("source_signal") if isinstance(candidate.get("source_signal"), dict) else {}
+    micro = candidate.get("microstructure") if isinstance(candidate.get("microstructure"), dict) else {}
+    quality = float(candidate.get("quality_score") or 0.0)
+    distance = min(max(float(signal.get("breakout_distance_bps") or 0.0), 0.0), 30.0)
+    volume = min(max(float(source.get("volume_ratio") or 0.0) - 1.0, 0.0), 2.0)
+    flow = max(float(micro.get("aligned_flow") or 0.0), 0.0)
+    breadth = max(int(source.get("breadth_alignment") or 0), 0)
+    return quality + 0.60 * distance + 5.0 * volume + 10.0 * flow + 3.0 * breadth
+
+
+def _best_confirmed_opportunity(
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    now_ms: int,
+) -> tuple[dict[str, Any], dict[str, Any], float] | None:
+    best: tuple[dict[str, Any], dict[str, Any], float] | None = None
+    for candidate in _candidate_choices(plan)[:SETUP_SCAN_CANDIDATES]:
+        symbol = str(candidate.get("symbol") or "").upper()
+        if not symbol or _cooldown_active(state, symbol, now_ms):
+            continue
+        gate_ok, _ = _candidate_live_gate(candidate)
+        if not gate_ok:
+            continue
+        try:
+            snap = setup_snapshot(symbol)
+        except Exception as exc:
+            _log({"event": "SETUP_V3_SNAPSHOT_ERROR", "symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        confirmed = snap.get("confirmed")
+        if not confirmed or not compatible_direction(candidate, str(confirmed.get("direction") or "")):
+            continue
+        score = _setup_opportunity_score(candidate, confirmed)
+        if best is None or score > best[2]:
+            best = (candidate, confirmed, score)
+    return best
+
+
 def _find_setup_candidate(
     plan: dict[str, Any],
     *,
@@ -316,6 +385,9 @@ def _find_setup_candidate(
         if cand_symbol != target:
             continue
         if not compatible_direction(candidate, expected):
+            continue
+        gate_ok, _ = _candidate_live_gate(candidate)
+        if not gate_ok:
             continue
         if not ignore_symbol_cooldown and _cooldown_active(state, cand_symbol, now_ms):
             continue
@@ -340,6 +412,11 @@ def _setup_live_success(
 
     setup["stage"] = live_stage
     setup["last_live_entry_ts_ms"] = now_ms
+    setup["current_live_direction"] = (
+        "LONG" if str(candidate.get("side") or "").lower() == "buy" else "SHORT"
+    )
+    setup["live_quality_score"] = candidate.get("quality_score")
+    setup["live_quality_tier"] = candidate.get("quality_tier")
     if live_stage == "FIRST_LIVE":
         setup["first_live_opened"] = True
     elif live_stage == "REVERSAL_LIVE":
@@ -393,6 +470,78 @@ def _setup_live_abort(
     return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
 
 
+def _detect_setup_exchange_close(
+    client: Any,
+    state: dict[str, Any],
+    exits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Advance setup state when exchange STOP/TP closed a leg between manager polls."""
+    setup = state.get("setup_v2")
+    if not isinstance(setup, dict) or str(setup.get("stage") or "") not in {"FIRST_LIVE", "REVERSAL_LIVE"}:
+        return []
+    symbol = str(setup.get("symbol") or "").upper()
+    if not symbol:
+        return []
+    if any(str(x.get("symbol") or "").upper() == symbol for x in exits):
+        return []
+    if symbol in _position_rows_map(client.open_positions()):
+        return []
+
+    result = {
+        "ok": True,
+        "reason": "EXCHANGE_POSITION_GONE",
+        "symbol": symbol,
+        "exit_reason": "EXCHANGE_PROTECTION_OR_EXTERNAL",
+        "pnl_bps_before_close": None,
+        "pnl_unknown": True,
+    }
+    _log({"event": "SETUP_V3_EXCHANGE_CLOSE_DETECTED", **result, "setup": setup})
+    return [result]
+
+
+def _setup_invalidation_exit(client: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
+    setup = state.get("setup_v2")
+    if not isinstance(setup, dict) or str(setup.get("stage") or "") not in {"FIRST_LIVE", "REVERSAL_LIVE"}:
+        return []
+    symbol = str(setup.get("symbol") or "").upper()
+    direction = str(setup.get("current_live_direction") or setup.get("original_direction") or "").upper()
+    if not symbol or direction not in {"LONG", "SHORT"}:
+        return []
+
+    meta = (state.get("positions") or {}).get(symbol) or {}
+    opened_ms = int(meta.get("opened_ts_ms") or setup.get("last_live_entry_ts_ms") or 0)
+    if opened_ms and int(time.time() * 1000) - opened_ms < 60_000:
+        return []
+
+    try:
+        close = latest_completed_close(symbol)
+    except Exception:
+        return []
+    if not breakout_invalidated(
+        direction,
+        float(setup.get("range_high") or 0.0),
+        float(setup.get("range_low") or 0.0),
+        close,
+    ):
+        return []
+
+    row = _position_rows_map(client.open_positions()).get(symbol)
+    if row is None:
+        return []
+    pnl_bps = float(meta.get("last_pnl_bps") or 0.0)
+    result = _close_position(client, state, row, "SETUP_INVALIDATION", pnl_bps)
+    _log({
+        "event": "SETUP_V3_INVALIDATION_EXIT",
+        "symbol": symbol,
+        "direction": direction,
+        "completed_close": close,
+        "range_high": setup.get("range_high"),
+        "range_low": setup.get("range_low"),
+        "result": result,
+    })
+    return [result]
+
+
 def _apply_setup_exit_state(
     state: dict[str, Any],
     exits: list[dict[str, Any]],
@@ -409,6 +558,19 @@ def _apply_setup_exit_state(
         if str(row.get("symbol") or "").upper() != symbol:
             continue
         stage = str(setup.get("stage") or "")
+        if not bool(row.get("pnl_unknown")):
+            gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
+            _log({
+                "event": "SETUP_V3_TRADE_RESULT",
+                "symbol": symbol,
+                "setup_stage": stage,
+                "exit_reason": row.get("exit_reason"),
+                "gross_bps": gross_bps,
+                "approx_net_bps": gross_bps - ROUND_TRIP_TAKER_COST_BPS,
+                "quality_tier": setup.get("live_quality_tier"),
+                "quality_score": setup.get("live_quality_score"),
+                "setup_opportunity_score": setup.get("setup_opportunity_score"),
+            })
         if stage == "FIRST_LIVE":
             setup["stage"] = "WAIT_REVERSAL"
             setup["first_live_closed"] = True
@@ -567,43 +729,46 @@ def _try_setup_v2_entry(
             "pair_reason": pair_reason,
         }
 
-    first_probe: tuple[dict[str, Any], dict[str, Any]] | None = None
-    for candidate in _candidate_choices(plan)[:6]:
+    confirmed_best = _best_confirmed_opportunity(plan, state, now_ms)
+    if confirmed_best is not None:
+        candidate, confirmed, setup_score = confirmed_best
+        setup = new_setup_from_signal(confirmed, now_ms)
+        setup["stage"] = "CONFIRMED_READY"
+        setup["setup_opportunity_score"] = round(setup_score, 4)
+        state["setup_v2"] = setup
+        result = execute_candidate(dict(candidate))
+        if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
+            return _setup_live_success(
+                state,
+                setup,
+                candidate,
+                result,
+                live_stage="FIRST_LIVE",
+                now_ms=now_ms,
+            )
+        return _setup_live_abort(state, result, pair_reason)
+
+    first_probe: tuple[dict[str, Any], dict[str, Any], float] | None = None
+    for candidate in _candidate_choices(plan)[:SETUP_SCAN_CANDIDATES]:
         symbol = str(candidate.get("symbol") or "").upper()
         if not symbol or _cooldown_active(state, symbol, now_ms):
             continue
-        snap = setup_snapshot(symbol)
-
-        confirmed = snap.get("confirmed")
-        if confirmed and compatible_direction(candidate, str(confirmed.get("direction") or "")):
-            setup = new_setup_from_signal(confirmed, now_ms)
-            setup["stage"] = "CONFIRMED_READY"
-            state["setup_v2"] = setup
-            result = execute_candidate(dict(candidate))
-            if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
-                return _setup_live_success(
-                    state,
-                    setup,
-                    candidate,
-                    result,
-                    live_stage="FIRST_LIVE",
-                    now_ms=now_ms,
-                )
-            return _setup_live_abort(state, result, pair_reason)
-
+        try:
+            snap = setup_snapshot(symbol)
+        except Exception:
+            continue
         probe = snap.get("probe")
-        if (
-            first_probe is None
-            and probe
-            and compatible_direction(candidate, str(probe.get("direction") or ""))
-        ):
-            first_probe = (candidate, probe)
+        if probe and compatible_direction(candidate, str(probe.get("direction") or "")):
+            score = _setup_opportunity_score(candidate, probe)
+            if first_probe is None or score > first_probe[2]:
+                first_probe = (candidate, probe, score)
 
     if first_probe is not None:
-        candidate, probe = first_probe
+        candidate, probe, probe_score = first_probe
         setup = new_setup_from_signal(probe, now_ms)
         setup["quality_tier_at_probe"] = candidate.get("quality_tier")
         setup["quality_score_at_probe"] = candidate.get("quality_score")
+        setup["setup_opportunity_score"] = round(probe_score, 4)
         state["setup_v2"] = setup
         _log({
             "event": "SETUP_V2_PROBE_SHADOW",
@@ -681,6 +846,7 @@ def run_session() -> None:
     initial = _portfolio_snapshot(client)
     now_ms = int(time.time() * 1000)
 
+    state["strategy_version"] = "SETUP_V3_PROFIT_SCALE"
     state["session_start_equity"] = float(initial["equity_usd"])
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
@@ -697,6 +863,7 @@ def run_session() -> None:
 
     _log({
         "event": "BOUNDED_SESSION_START",
+        "strategy_version": state["strategy_version"],
         "session_start_equity": state["session_start_equity"],
         "session_capital_usd": state["session_capital_usd"],
         "session_duration_sec": SESSION_DURATION_SEC,
@@ -738,6 +905,8 @@ def run_session() -> None:
                 return
 
             exits = _manage_positions(client, state)
+            exits.extend(_detect_setup_exchange_close(client, state, exits))
+            exits.extend(_setup_invalidation_exit(client, state))
             now_ms = int(time.time() * 1000)
             _apply_exit_cooldowns(state, exits, now_ms)
             _apply_setup_exit_state(state, exits, now_ms)
@@ -849,6 +1018,9 @@ def status() -> dict[str, Any]:
             "breakout_buffer_pct": BREAKOUT_BUFFER_PCT,
             "min_move_from_anchor_pct": MIN_MOVE_FROM_ANCHOR_PCT,
             "probe_expiry_sec": PROBE_EXPIRY_SEC,
+            "scan_candidates": SETUP_SCAN_CANDIDATES,
+            "live_min_quality_score": LIVE_MIN_QUALITY_SCORE,
+            "require_fresh_micro_confirm": LIVE_REQUIRE_FRESH_MICRO_CONFIRM,
             "max_actual_entries": SESSION_MAX_ENTRIES,
         },
         "simple_pair_live_enabled": PAIR_LIVE_ENABLED,
@@ -863,7 +1035,7 @@ def selftest() -> dict[str, Any]:
         "max_entries_2": SESSION_MAX_ENTRIES == 2,
         "setup_engine_enabled": SETUP_ENGINE_ENABLED,
         "capital_22": SESSION_CAPITAL_USD == 22.0,
-        "drawdown_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "drawdown_5": MAX_SESSION_DRAWDOWN_PCT == 5.0,
         "max_open_4": MAX_OPEN_POSITIONS == 4,
         "adaptive_pacing": (
             GLOBAL_ENTRY_ELITE_SEC < GLOBAL_ENTRY_STRONG_SEC < GLOBAL_ENTRY_BASE_SEC
@@ -887,6 +1059,9 @@ def selftest() -> dict[str, Any]:
         ) == (False, "SESSION_ENTRY_LIMIT_REACHED"),
         "setup_probe_shadow_only": PROBE_LOOKBACK_MIN == 3,
         "setup_confirm_15m": CONFIRM_LOOKBACK_MIN == 15,
+        "setup_scan_candidates_positive": SETUP_SCAN_CANDIDATES >= 6,
+        "live_quality_gate": LIVE_MIN_QUALITY_SCORE >= 68.0,
+        "pair_shadow_off_during_live": not PAIR_SHADOW_SCAN_DURING_LIVE,
     }
     return {"ok": all(checks.values()), "checks": checks}
 

@@ -38,7 +38,8 @@ LOOP_SEC = 5
 MIN_PROFIT_HOLD_SEC = 20
 SMALL_PROFIT_AFTER_SEC = 120
 NO_PROGRESS_SEC = 180
-HARD_MAX_HOLD_SEC = 480
+HARD_MAX_HOLD_SEC = 720
+WINNER_HARD_MAX_HOLD_SEC = 1800
 
 QUICK_PROFIT_GROSS_BPS = 45.0
 SMALL_PROFIT_GROSS_BPS = 60.0
@@ -59,7 +60,7 @@ NO_PROGRESS_CURRENT_BPS = 22.0
 
 ADOPT_STOP_BPS = 45.0
 ADOPT_TAKE_BPS = 300.0
-MAX_SESSION_DRAWDOWN_PCT = 50.0
+MAX_SESSION_DRAWDOWN_PCT = 5.0
 SESSION_CAPITAL_USD = 22.0
 MAX_CONSECUTIVE_ERRORS = 5
 
@@ -410,6 +411,7 @@ def _close_position(client: Any, state: dict[str, Any], row: dict[str, Any], rea
             "TRAILING_PROFIT": "trailing_profit_exits",
             "NO_PROGRESS": "no_progress_exits",
             "HARD_MAX_HOLD": "hard_time_exits",
+            "WINNER_MAX_HOLD": "hard_time_exits",
         }.get(reason)
         if key:
             state["stats"][key] = int(state["stats"].get(key, 0)) + 1
@@ -435,16 +437,20 @@ def _trailing_floor_bps(max_fav_bps: float) -> float | None:
 
 
 def _exit_reason(age_sec: float, pnl_bps: float, max_fav_bps: float) -> str | None:
-    if age_sec >= HARD_MAX_HOLD_SEC:
-        return "HARD_MAX_HOLD"
-
     trail_floor = _trailing_floor_bps(max_fav_bps)
     if trail_floor is not None:
-        # Once trailing is armed, let the winner run. Exit only after a
-        # meaningful pullback from the best favorable excursion.
+        # The old manager checked the generic hard timeout first, which capped
+        # exactly the rare tail winners the strategy needs. Once trailing is
+        # armed, manage by high-water pullback and use only a much longer
+        # emergency winner timeout.
         if pnl_bps <= trail_floor:
             return "TRAILING_PROFIT"
+        if age_sec >= WINNER_HARD_MAX_HOLD_SEC:
+            return "WINNER_MAX_HOLD"
         return None
+
+    if age_sec >= HARD_MAX_HOLD_SEC:
+        return "HARD_MAX_HOLD"
 
     if (
         age_sec >= NO_PROGRESS_SEC
@@ -683,6 +689,7 @@ def status() -> dict[str, Any]:
             },
             "no_progress_sec": NO_PROGRESS_SEC,
             "hard_max_hold_sec": HARD_MAX_HOLD_SEC,
+            "winner_hard_max_hold_sec": WINNER_HARD_MAX_HOLD_SEC,
             "max_open_positions": MAX_OPEN_POSITIONS,
             "max_trade_notional_usd": MAX_NOTIONAL_USD,
             "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
@@ -711,7 +718,9 @@ def selftest() -> dict[str, Any]:
         ),
         "small_profit": _exit_reason(121, 61.0, 40.0) == "SMALL_PROFIT",
         "no_progress": _exit_reason(181, 5.0, 15.0) == "NO_PROGRESS",
-        "hard_max": _exit_reason(481, 100.0, 100.0) == "HARD_MAX_HOLD",
+        "hard_max": _exit_reason(HARD_MAX_HOLD_SEC + 1, 10.0, 10.0) == "HARD_MAX_HOLD",
+        "trailed_winner_survives_generic_hard_max": _exit_reason(HARD_MAX_HOLD_SEC + 1, 60.0, 70.0) is None,
+        "winner_emergency_timeout": _exit_reason(WINNER_HARD_MAX_HOLD_SEC + 1, 60.0, 70.0) == "WINNER_MAX_HOLD",
         "no_early_exit": _exit_reason(10, 100.0, 100.0) is None,
         "constants_sane": (
             QUICK_PROFIT_GROSS_BPS > 20.0
@@ -719,7 +728,7 @@ def selftest() -> dict[str, Any]:
             and NO_PROGRESS_SEC < HARD_MAX_HOLD_SEC
             and MAX_OPEN_POSITIONS == 4
         ),
-        "drawdown_limit_is_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "drawdown_limit_is_5": MAX_SESSION_DRAWDOWN_PCT == 5.0,
         "capital_budget_is_22": SESSION_CAPITAL_USD == 22.0,
     }
     return {"ok": all(checks.values()), "checks": checks}

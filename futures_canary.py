@@ -4,12 +4,15 @@ import argparse
 import json
 import math
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import requests
+
+from futures_scale_gate import evidence as scale_evidence, scale_multiplier as evidence_scale_multiplier
 
 from futures_private import (
     client_from_env,
@@ -53,10 +56,12 @@ MICRO_MIN_TRADES = 8
 MICRO_VETO_TRADES = 12
 MICRO_OPPOSING_FLOW_VETO = -0.18
 MICRO_ALIGNED_FLOW_CONFIRM = 0.05
+MICRO_FLOW_MAX_AGE_SEC = 120
+LIVE_MIN_QUALITY_SCORE = 68.0
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
-MAX_NOTIONAL_USD = 5.0
+MAX_NOTIONAL_USD = 10.0
 MAX_NOTIONAL_PCT_EQUITY = 35.0
 MAX_OPEN_POSITIONS = 4
 MAX_PORTFOLIO_NOTIONAL_USD = 20.0
@@ -77,6 +82,37 @@ def execution_signal_side(base_side: str) -> str:
     return "SHORT" if side == "LONG" else "LONG"
 
 
+def _timestamp_ms(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        x = float(value)
+        if x > 1e12:
+            return int(x)
+        if x > 1e9:
+            return int(x * 1000)
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def _completed_candles(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "time" not in df.columns:
+        return df.copy()
+    last_ts = _timestamp_ms(df["time"].iloc[-1])
+    if last_ts is None:
+        return df.copy()
+    if int(time.time() * 1000) - last_ts < 60_000:
+        return df.iloc[:-1].reset_index(drop=True)
+    return df.reset_index(drop=True)
+
+
 def _candles(symbol: str, count: int = 120) -> pd.DataFrame:
     r = requests.get(
         f"{CHARTS}/trade/{symbol}/1m",
@@ -95,7 +131,8 @@ def _candles(symbol: str, count: int = 120) -> pd.DataFrame:
         raise RuntimeError(f"Unexpected futures candle schema for {symbol}: {missing}")
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna().reset_index(drop=True)
+    df = df.dropna().reset_index(drop=True)
+    return _completed_candles(df)
 
 
 def _ret(s: pd.Series, n: int) -> float:
@@ -329,7 +366,9 @@ def _breadth_alignment(side: str, breadth: dict[str, Any]) -> int:
 
 
 def _recent_trade_flow(symbol: str) -> dict[str, Any]:
-    """Public taker-flow proxy from Kraken Futures recent trade history."""
+    """Fresh taker-flow proxy using only recent Kraken Futures trades."""
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - MICRO_FLOW_MAX_AGE_SEC * 1000
     try:
         r = requests.get(FUTURES_HISTORY, params={"symbol": symbol}, timeout=10)
         r.raise_for_status()
@@ -337,20 +376,27 @@ def _recent_trade_flow(symbol: str) -> dict[str, Any]:
     except Exception as exc:
         return {
             "available": False,
+            "fresh": False,
             "symbol": symbol,
             "trade_count": 0,
             "flow_imbalance": 0.0,
+            "max_age_sec": MICRO_FLOW_MAX_AGE_SEC,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
     buy = 0.0
     sell = 0.0
     count = 0
+    newest_ms: int | None = None
+    oldest_ms: int | None = None
     for row in rows[:100]:
         if not isinstance(row, dict):
             continue
         typ = str(row.get("type") or "fill").lower()
-        if typ in {"block", "assignment"}:
+        if typ in {"block", "assignment", "termination"}:
+            continue
+        ts_ms = _timestamp_ms(row.get("time"))
+        if ts_ms is None or ts_ms < cutoff_ms:
             continue
         side = str(row.get("side") or "").lower()
         if side not in {"buy", "sell"}:
@@ -363,6 +409,8 @@ def _recent_trade_flow(symbol: str) -> dict[str, Any]:
         weight = abs(px * size)
         if weight <= 0:
             continue
+        newest_ms = ts_ms if newest_ms is None else max(newest_ms, ts_ms)
+        oldest_ms = ts_ms if oldest_ms is None else min(oldest_ms, ts_ms)
         if side == "buy":
             buy += weight
         else:
@@ -371,13 +419,19 @@ def _recent_trade_flow(symbol: str) -> dict[str, Any]:
 
     total = buy + sell
     flow = (buy - sell) / total if total > 0 else 0.0
+    newest_age_sec = (now_ms - newest_ms) / 1000.0 if newest_ms is not None else None
+    fresh = bool(count >= MICRO_MIN_TRADES and newest_age_sec is not None and newest_age_sec <= MICRO_FLOW_MAX_AGE_SEC)
     return {
         "available": bool(count),
+        "fresh": fresh,
         "symbol": symbol,
         "trade_count": count,
         "buy_notional_proxy": round(buy, 6),
         "sell_notional_proxy": round(sell, 6),
         "flow_imbalance": round(flow, 4),
+        "newest_age_sec": round(newest_age_sec, 3) if newest_age_sec is not None else None,
+        "window_span_sec": round((newest_ms - oldest_ms) / 1000.0, 3) if newest_ms is not None and oldest_ms is not None else None,
+        "max_age_sec": MICRO_FLOW_MAX_AGE_SEC,
     }
 
 
@@ -387,13 +441,16 @@ def _quality_profile(signal: dict[str, Any], micro: dict[str, Any]) -> dict[str,
     flow = float(micro.get("flow_imbalance") or 0.0)
     aligned_flow = direction * flow
     trade_count = int(micro.get("trade_count") or 0)
+    flow_fresh = bool(micro.get("fresh"))
 
     micro_veto = bool(
-        trade_count >= MICRO_VETO_TRADES
+        flow_fresh
+        and trade_count >= MICRO_VETO_TRADES
         and aligned_flow <= MICRO_OPPOSING_FLOW_VETO
     )
     micro_confirmed = bool(
-        trade_count >= MICRO_MIN_TRADES
+        flow_fresh
+        and trade_count >= MICRO_MIN_TRADES
         and aligned_flow >= MICRO_ALIGNED_FLOW_CONFIRM
     )
 
@@ -401,7 +458,7 @@ def _quality_profile(signal: dict[str, Any], micro: dict[str, Any]) -> dict[str,
     edge = _clamp((float(signal.get("taker_net_edge_bps") or 0.0) - MIN_TAKER_NET_EDGE_BPS) / 75.0, 0.0, 1.0)
     volume = _clamp((float(signal.get("volume_ratio") or 0.0) - MIN_VOLUME_RATIO) / 1.40, 0.0, 1.0)
     structure = 1.0 if bool(signal.get("breakout")) else 0.72 if bool(signal.get("continuation_ok")) else 0.0
-    flow_score = _clamp((aligned_flow + 0.50) / 1.00, 0.0, 1.0) if trade_count >= MICRO_MIN_TRADES else 0.50
+    flow_score = _clamp((aligned_flow + 0.50) / 1.00, 0.0, 1.0) if flow_fresh and trade_count >= MICRO_MIN_TRADES else 0.50
     breadth_alignment = int(signal.get("breadth_alignment") or 0)
     breadth_score = 0.65 if breadth_alignment > 0 else 0.35 if breadth_alignment < 0 else 0.50
 
@@ -428,6 +485,7 @@ def _quality_profile(signal: dict[str, Any], micro: dict[str, Any]) -> dict[str,
         "quality_tier": tier,
         "microstructure_ok": not micro_veto,
         "microstructure_confirmed": micro_confirmed,
+        "microstructure_fresh": flow_fresh,
         "aligned_flow": round(aligned_flow, 4),
         "micro": micro,
     }
@@ -565,14 +623,30 @@ def _position_size(client: Any, symbol: str) -> float:
     return float(position_map(client.open_positions()).get(symbol.upper(), 0.0))
 
 
-def _target_notional_for_signal(signal: dict[str, Any], minimum_notional: float) -> float:
-    """Volatility-managed sizing: keep risk smaller when current ATR is elevated."""
+def _target_notional_for_signal(
+    signal: dict[str, Any],
+    minimum_notional: float,
+    quality: dict[str, Any] | None = None,
+) -> float:
+    """Scale only proven edge; volatility and signal quality can only reduce base risk."""
     try:
         atr_bps = max(float(signal.get("atr_bps") or 0.0), 1e-9)
     except Exception:
         atr_bps = VOL_TARGET_ATR_BPS
-    scale = min(1.0, max(0.40, VOL_TARGET_ATR_BPS / atr_bps))
-    target = TARGET_NOTIONAL_USD * scale
+    vol_scale = min(1.0, max(0.40, VOL_TARGET_ATR_BPS / atr_bps))
+
+    q = quality or {}
+    qscore = float(q.get("quality_score") or 0.0)
+    qtier = str(q.get("quality_tier") or "BASE").upper()
+    if qtier == "ELITE" and qscore >= 80.0:
+        quality_scale = 1.0
+    elif qtier == "STRONG" and qscore >= LIVE_MIN_QUALITY_SCORE:
+        quality_scale = 0.85
+    else:
+        quality_scale = 0.70
+
+    evidence_scale = evidence_scale_multiplier()
+    target = TARGET_NOTIONAL_USD * vol_scale * quality_scale * evidence_scale
     target = max(MIN_TARGET_NOTIONAL_USD, target, float(minimum_notional))
     return min(MAX_NOTIONAL_USD, target)
 
@@ -657,7 +731,10 @@ def private_plan() -> dict[str, Any]:
         csize = contract_size(symbol)
         minimum = min_lot(symbol)
         minimum_notional = minimum * px * csize
-        desired_notional = _target_notional_for_signal(p, minimum_notional)
+        desired_notional = min(
+            notional_cap,
+            _target_notional_for_signal(p, minimum_notional, quality),
+        )
         raw_size = desired_notional / (px * csize)
         size = round_size_down(symbol, raw_size)
         if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
@@ -716,6 +793,8 @@ def private_plan() -> dict[str, Any]:
             "estimated_notional_usd": size * px * csize,
             "target_notional_usd": desired_notional,
             "volatility_sizing_scale": round(desired_notional / TARGET_NOTIONAL_USD, 4),
+            "evidence_scale": evidence_scale_multiplier(),
+            "scale_evidence": scale_evidence(),
             "equity_usd": equity,
             "notional_cap_usd": notional_cap,
             "stop_price": stop_price,
@@ -965,8 +1044,8 @@ def rescue_existing_position() -> dict[str, Any]:
         except Exception:
             pass
 
-        stop_frac = 0.005
-        take_frac = 0.010
+        stop_frac = HARD_STOP_BPS / 10000.0
+        take_frac = BACKUP_TAKE_PROFIT_BPS / 10000.0
         if signed_size > 0:
             stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
             take_price = round_price_to_tick(symbol, px * (1.0 + take_frac), mode="up")
@@ -1230,10 +1309,10 @@ def selftest() -> dict[str, Any]:
         "breadth_alignment": 1,
     }
     aligned = _quality_profile(signal, {
-        "available": True, "trade_count": 30, "flow_imbalance": 0.40,
+        "available": True, "fresh": True, "trade_count": 30, "flow_imbalance": 0.40,
     })
     opposing = _quality_profile(signal, {
-        "available": True, "trade_count": 30, "flow_imbalance": -0.50,
+        "available": True, "fresh": True, "trade_count": 30, "flow_imbalance": -0.50,
     })
     low_vol_size = _target_notional_for_signal({"atr_bps": 12.0}, 0.1)
     high_vol_size = _target_notional_for_signal({"atr_bps": 50.0}, 0.1)
@@ -1245,6 +1324,8 @@ def selftest() -> dict[str, Any]:
         "volatility_reduces_size": high_vol_size < low_vol_size,
         "broad_universe": UNIVERSE_PREFILTER > MAX_UNIVERSE >= 20,
         "scan_cache_positive": PUBLIC_SCAN_CACHE_SEC > 0,
+        "flow_window_positive": MICRO_FLOW_MAX_AGE_SEC > 0,
+        "live_quality_gate_positive": LIVE_MIN_QUALITY_SCORE >= 50.0,
         "inverse_long_to_short": execution_signal_side("LONG") == ("SHORT" if INVERT_DIRECTION else "LONG"),
         "inverse_short_to_long": execution_signal_side("SHORT") == ("LONG" if INVERT_DIRECTION else "SHORT"),
     }

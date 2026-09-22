@@ -16,6 +16,7 @@ PROBE_LOOKBACK_MIN = 3
 CONFIRM_LOOKBACK_MIN = 15
 BREAKOUT_BUFFER_PCT = 0.0005
 MIN_MOVE_FROM_ANCHOR_PCT = 0.0035
+INVALIDATION_INSIDE_RANGE_BPS = 5.0
 PROBE_EXPIRY_SEC = 20 * 60
 
 
@@ -217,6 +218,27 @@ def fixed_range_reversal(
     return None
 
 
+def breakout_invalidated(
+    direction: str,
+    range_high: float,
+    range_low: float,
+    close: float,
+    *,
+    inside_range_bps: float = INVALIDATION_INSIDE_RANGE_BPS,
+) -> bool:
+    """A closed candle has materially failed back inside the breakout range."""
+    side = str(direction).upper()
+    hi = float(range_high)
+    lo = float(range_low)
+    px = float(close)
+    if min(hi, lo, px) <= 0 or side not in {"LONG", "SHORT"}:
+        return False
+    frac = max(float(inside_range_bps), 0.0) / 10000.0
+    if side == "LONG":
+        return px < hi * (1.0 - frac)
+    return px > lo * (1.0 + frac)
+
+
 def latest_completed_close(symbol: str) -> float:
     df = _candles(symbol)
     if df.empty:
@@ -276,6 +298,9 @@ def selftest() -> dict[str, Any]:
         "confirmed_long": bool(sig_up and sig_up.direction == "LONG"),
         "confirmed_short": bool(sig_down and sig_down.direction == "SHORT"),
         "reversal_short": bool(rev and rev["direction"] == "SHORT"),
+        "long_invalidation": breakout_invalidated("LONG", 101.0, 99.0, 100.90),
+        "short_invalidation": breakout_invalidated("SHORT", 101.0, 99.0, 99.10),
+        "long_not_invalidated": not breakout_invalidated("LONG", 101.0, 99.0, 101.20),
         "probe_expiry_positive": PROBE_EXPIRY_SEC > CONFIRM_LOOKBACK_MIN * 60,
     }
     return {"ok": all(checks.values()), "checks": checks}
