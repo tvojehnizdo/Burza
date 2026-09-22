@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 LOG_PATH = Path("data/futures_autopilot_events.jsonl")
+AUDITED_PATH = Path("data/futures_scale_audited.jsonl")
 
 MIN_STAGE1_TRADES = 20
 MIN_STAGE2_TRADES = 40
@@ -18,7 +19,7 @@ STAGE2_MEAN_NET_BPS = 8.0
 STAGE3_MEAN_NET_BPS = 12.0
 
 
-def _rows(path: Path = LOG_PATH) -> list[dict[str, Any]]:
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     out: list[dict[str, Any]] = []
@@ -27,14 +28,55 @@ def _rows(path: Path = LOG_PATH) -> list[dict[str, Any]]:
             row = json.loads(line)
         except Exception:
             continue
-        if isinstance(row, dict) and str(row.get("event") or "") == "SETUP_V3_TRADE_RESULT":
+        if isinstance(row, dict):
             out.append(row)
     return out
 
 
+def append_audited_result(row: dict[str, Any], path: Path = AUDITED_PATH) -> bool:
+    trade_key = str(row.get("trade_key") or "")
+    if not trade_key:
+        return False
+    existing = {
+        str(x.get("trade_key") or "")
+        for x in _read_jsonl(path)
+        if str(x.get("event") or "") == "SETUP_V3_AUDITED_RESULT"
+    }
+    if trade_key in existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"event": "SETUP_V3_AUDITED_RESULT", **row}
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    return True
+
+
+def _rows(path: Path = LOG_PATH) -> list[dict[str, Any]]:
+    audited = [
+        x for x in _read_jsonl(AUDITED_PATH)
+        if str(x.get("event") or "") == "SETUP_V3_AUDITED_RESULT"
+    ]
+    if audited:
+        dedup: dict[str, dict[str, Any]] = {}
+        for row in audited:
+            key = str(row.get("trade_key") or "")
+            if key:
+                dedup[key] = row
+        return list(dedup.values())
+
+    # Fallback while no post-session audit has been persisted yet.
+    return [
+        x for x in _read_jsonl(path)
+        if str(x.get("event") or "") == "SETUP_V3_TRADE_RESULT"
+    ]
+
+
 def evidence(path: Path = LOG_PATH) -> dict[str, Any]:
     rows = _rows(path)
-    vals = [float(x.get("approx_net_bps") or 0.0) for x in rows]
+    vals = [
+        float(x.get("net_bps") if x.get("net_bps") is not None else x.get("approx_net_bps") or 0.0)
+        for x in rows
+    ]
     wins = [x for x in vals if x > 0]
     losses = [x for x in vals if x < 0]
     gross_profit = sum(wins)
@@ -83,6 +125,7 @@ def evidence(path: Path = LOG_PATH) -> dict[str, Any]:
         "max_cumulative_drawdown_bps": round(max_dd, 3),
         "scale_tier": tier,
         "scale_multiplier": multiplier,
+        "evidence_source": "audited_exchange_history" if AUDITED_PATH.exists() else "manager_estimate",
         "requirements": {
             "stage1": {"trades": MIN_STAGE1_TRADES, "profit_factor": STAGE1_PF, "net_positive": True},
             "stage2": {"trades": MIN_STAGE2_TRADES, "profit_factor": STAGE2_PF, "mean_net_bps": STAGE2_MEAN_NET_BPS},
