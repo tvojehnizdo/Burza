@@ -36,9 +36,22 @@ from futures_canary import (
 from futures_pairs import scan_pairs
 from futures_private import save_policy
 from futures_shadow_learning import observe_plan as shadow_observe_plan, resolve_due as shadow_resolve_due
+from futures_setup_engine import (
+    BREAKOUT_BUFFER_PCT,
+    CONFIRM_LOOKBACK_MIN,
+    MIN_MOVE_FROM_ANCHOR_PCT,
+    PROBE_EXPIRY_SEC,
+    PROBE_LOOKBACK_MIN,
+    compatible_direction,
+    fixed_range_reversal,
+    latest_completed_close,
+    new_setup_from_signal,
+    snapshot as setup_snapshot,
+)
 
 SESSION_DURATION_SEC = 60 * 60
-SESSION_MAX_ENTRIES = 10
+SESSION_MAX_ENTRIES = 2
+SETUP_ENGINE_ENABLED = True
 REENTRY_COOLDOWN_SEC = 300
 GLOBAL_ENTRY_BASE_SEC = 90
 GLOBAL_ENTRY_STRONG_SEC = 45
@@ -279,6 +292,341 @@ def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "reason": "NO_EXECUTABLE_PAIR"}
 
 
+def _candidate_choices(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    if isinstance(plan.get("candidate"), dict):
+        rows.append(plan["candidate"])
+    rows.extend(x for x in (plan.get("alternatives") or []) if isinstance(x, dict))
+    return rows
+
+
+def _find_setup_candidate(
+    plan: dict[str, Any],
+    *,
+    symbol: str,
+    direction: str,
+    state: dict[str, Any],
+    now_ms: int,
+    ignore_symbol_cooldown: bool = False,
+) -> dict[str, Any] | None:
+    target = str(symbol).upper()
+    expected = str(direction).upper()
+    for candidate in _candidate_choices(plan):
+        cand_symbol = str(candidate.get("symbol") or "").upper()
+        if cand_symbol != target:
+            continue
+        if not compatible_direction(candidate, expected):
+            continue
+        if not ignore_symbol_cooldown and _cooldown_active(state, cand_symbol, now_ms):
+            continue
+        return candidate
+    return None
+
+
+def _setup_live_success(
+    state: dict[str, Any],
+    setup: dict[str, Any],
+    candidate: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    live_stage: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
+    state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 1
+    symbol = str((result.get("candidate") or {}).get("symbol") or candidate.get("symbol") or "").upper()
+    _set_symbol_cooldown(state, symbol, now_ms)
+    state["last_any_entry_ts_ms"] = now_ms
+
+    setup["stage"] = live_stage
+    setup["last_live_entry_ts_ms"] = now_ms
+    if live_stage == "FIRST_LIVE":
+        setup["first_live_opened"] = True
+    elif live_stage == "REVERSAL_LIVE":
+        setup["reversal_used"] = True
+    state["setup_v2"] = setup
+
+    _log({
+        "event": "SETUP_V2_LIVE_ENTRY",
+        "symbol": symbol,
+        "setup_stage": live_stage,
+        "original_direction": setup.get("original_direction"),
+        "candidate_direction": (
+            (candidate.get("source_signal") or {}).get("base_side")
+            if isinstance(candidate.get("source_signal"), dict)
+            else None
+        ),
+        "session_entry_count": state["session_entry_count"],
+        "result": result,
+        "setup": setup,
+    })
+    return {
+        "ok": True,
+        "reason": "SETUP_V2_LIVE_ENTRY_OPENED",
+        "symbol": symbol,
+        "setup_stage": live_stage,
+        "session_entry_count": state["session_entry_count"],
+    }
+
+
+def _setup_live_abort(
+    state: dict[str, Any],
+    result: dict[str, Any],
+    pair_reason: str | None,
+) -> dict[str, Any]:
+    if result.get("reason") == "FUTURES_CANARY_ABORTED":
+        state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
+        if result.get("actual_order_submitted"):
+            state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
+            state["entry_halt_reason"] = "LIVE_ABORT_CIRCUIT_BREAKER"
+            _log({
+                "event": "SETUP_V2_LIVE_ABORT_HALT",
+                "result": result,
+                "pair_reason": pair_reason,
+            })
+            return {"ok": False, "reason": "LIVE_ABORT_CIRCUIT_BREAKER"}
+    _log({
+        "event": "SETUP_V2_ENTRY_NOT_OPENED",
+        "result": result,
+        "pair_reason": pair_reason,
+    })
+    return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
+
+
+def _apply_setup_exit_state(
+    state: dict[str, Any],
+    exits: list[dict[str, Any]],
+    now_ms: int,
+) -> None:
+    setup = state.get("setup_v2")
+    if not isinstance(setup, dict) or not setup:
+        return
+    symbol = str(setup.get("symbol") or "").upper()
+    if not symbol:
+        return
+
+    for row in exits:
+        if str(row.get("symbol") or "").upper() != symbol:
+            continue
+        stage = str(setup.get("stage") or "")
+        if stage == "FIRST_LIVE":
+            setup["stage"] = "WAIT_REVERSAL"
+            setup["first_live_closed"] = True
+            setup["first_live_exit_ts_ms"] = now_ms
+            setup["first_live_exit_reason"] = row.get("exit_reason")
+            _log({
+                "event": "SETUP_V2_WAIT_REVERSAL",
+                "symbol": symbol,
+                "setup": setup,
+                "exit": row,
+            })
+        elif stage == "REVERSAL_LIVE":
+            setup["stage"] = "DONE"
+            setup["done"] = True
+            setup["done_ts_ms"] = now_ms
+            setup["reversal_exit_reason"] = row.get("exit_reason")
+            _log({
+                "event": "SETUP_V2_DONE",
+                "symbol": symbol,
+                "setup": setup,
+                "exit": row,
+            })
+        state["setup_v2"] = setup
+
+
+def _try_setup_v2_entry(
+    state: dict[str, Any],
+    plan: dict[str, Any],
+    now_ms: int,
+    pair_reason: str | None,
+) -> dict[str, Any]:
+    setup = state.get("setup_v2")
+    if not isinstance(setup, dict):
+        setup = {}
+
+    stage = str(setup.get("stage") or "")
+    if stage in {"FIRST_LIVE", "REVERSAL_LIVE"}:
+        return {"ok": True, "reason": f"SETUP_V2_{stage}_MANAGED"}
+
+    if stage == "DONE":
+        return {"ok": True, "reason": "SETUP_V2_DONE"}
+
+    if stage == "PROBE_SHADOW":
+        if now_ms >= int(setup.get("expires_ts_ms") or 0):
+            _log({"event": "SETUP_V2_PROBE_EXPIRED", "setup": setup})
+            state["setup_v2"] = {}
+            setup = {}
+            stage = ""
+        else:
+            symbol = str(setup.get("symbol") or "").upper()
+            snap = setup_snapshot(symbol)
+            confirmed = snap.get("confirmed")
+            if not confirmed or str(confirmed.get("direction") or "").upper() != str(setup.get("original_direction") or "").upper():
+                return {
+                    "ok": True,
+                    "reason": "SETUP_V2_PROBE_WAIT_CONFIRMATION",
+                    "symbol": symbol,
+                    "setup": setup,
+                }
+
+            direction = str(confirmed["direction"]).upper()
+            candidate = _find_setup_candidate(
+                plan,
+                symbol=symbol,
+                direction=direction,
+                state=state,
+                now_ms=now_ms,
+            )
+            if candidate is None:
+                return {
+                    "ok": True,
+                    "reason": "SETUP_V2_CONFIRMED_BUT_QUALITY_NOT_READY",
+                    "symbol": symbol,
+                    "direction": direction,
+                }
+
+            setup.update({
+                "stage": "CONFIRMED_READY",
+                "range_high": float(confirmed["range_high"]),
+                "range_low": float(confirmed["range_low"]),
+                "anchor_open": float(confirmed["anchor_open"]),
+                "signal_close": float(confirmed["close"]),
+                "confirmed_ts_ms": now_ms,
+            })
+            result = execute_candidate(dict(candidate))
+            if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
+                return _setup_live_success(
+                    state,
+                    setup,
+                    candidate,
+                    result,
+                    live_stage="FIRST_LIVE",
+                    now_ms=now_ms,
+                )
+            return _setup_live_abort(state, result, pair_reason)
+
+    if stage == "WAIT_REVERSAL":
+        if bool(setup.get("reversal_used")):
+            setup["stage"] = "DONE"
+            setup["done"] = True
+            state["setup_v2"] = setup
+            return {"ok": True, "reason": "SETUP_V2_DONE"}
+
+        symbol = str(setup.get("symbol") or "").upper()
+        close = latest_completed_close(symbol)
+        rev = fixed_range_reversal(
+            symbol,
+            str(setup.get("original_direction") or ""),
+            float(setup.get("range_high") or 0.0),
+            float(setup.get("range_low") or 0.0),
+            close,
+        )
+        if not rev:
+            return {
+                "ok": True,
+                "reason": "SETUP_V2_WAIT_REVERSAL_BREAK",
+                "symbol": symbol,
+            }
+
+        direction = str(rev["direction"]).upper()
+        candidate = _find_setup_candidate(
+            plan,
+            symbol=symbol,
+            direction=direction,
+            state=state,
+            now_ms=now_ms,
+            ignore_symbol_cooldown=True,
+        )
+        if candidate is None:
+            return {
+                "ok": True,
+                "reason": "SETUP_V2_REVERSAL_BREAK_BUT_QUALITY_NOT_READY",
+                "symbol": symbol,
+                "direction": direction,
+                "reversal": rev,
+            }
+
+        result = execute_candidate(dict(candidate))
+        if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
+            setup["reversal_signal"] = rev
+            return _setup_live_success(
+                state,
+                setup,
+                candidate,
+                result,
+                live_stage="REVERSAL_LIVE",
+                now_ms=now_ms,
+            )
+        return _setup_live_abort(state, result, pair_reason)
+
+    if not plan.get("ready"):
+        return {
+            "ok": True,
+            "reason": str(plan.get("reason") or pair_reason or "NO_ENTRY"),
+            "candidate": (plan.get("public_scan") or {}).get("candidate"),
+            "pair_reason": pair_reason,
+        }
+
+    first_probe: tuple[dict[str, Any], dict[str, Any]] | None = None
+    for candidate in _candidate_choices(plan)[:6]:
+        symbol = str(candidate.get("symbol") or "").upper()
+        if not symbol or _cooldown_active(state, symbol, now_ms):
+            continue
+        snap = setup_snapshot(symbol)
+
+        confirmed = snap.get("confirmed")
+        if confirmed and compatible_direction(candidate, str(confirmed.get("direction") or "")):
+            setup = new_setup_from_signal(confirmed, now_ms)
+            setup["stage"] = "CONFIRMED_READY"
+            state["setup_v2"] = setup
+            result = execute_candidate(dict(candidate))
+            if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
+                return _setup_live_success(
+                    state,
+                    setup,
+                    candidate,
+                    result,
+                    live_stage="FIRST_LIVE",
+                    now_ms=now_ms,
+                )
+            return _setup_live_abort(state, result, pair_reason)
+
+        probe = snap.get("probe")
+        if (
+            first_probe is None
+            and probe
+            and compatible_direction(candidate, str(probe.get("direction") or ""))
+        ):
+            first_probe = (candidate, probe)
+
+    if first_probe is not None:
+        candidate, probe = first_probe
+        setup = new_setup_from_signal(probe, now_ms)
+        setup["quality_tier_at_probe"] = candidate.get("quality_tier")
+        setup["quality_score_at_probe"] = candidate.get("quality_score")
+        state["setup_v2"] = setup
+        _log({
+            "event": "SETUP_V2_PROBE_SHADOW",
+            "symbol": setup["symbol"],
+            "direction": setup["original_direction"],
+            "setup": setup,
+            "candidate": candidate,
+        })
+        return {
+            "ok": True,
+            "reason": "SETUP_V2_PROBE_SHADOW_STARTED",
+            "symbol": setup["symbol"],
+            "direction": setup["original_direction"],
+            "expires_sec": PROBE_EXPIRY_SEC,
+        }
+
+    return {
+        "ok": True,
+        "reason": "SETUP_V2_WAITING_FOR_RANGE_BREAKOUT",
+        "pair_reason": pair_reason,
+    }
+
+
 def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     allowed, reason = _entry_allowed(now_ms, state)
@@ -295,8 +643,6 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     pair_result = _try_pair_entry(state)
-    if pair_result.get("reason") == "PAIR_AUTO_ENTRY_OPENED":
-        return pair_result
     if state.get("entry_halt_reason"):
         return {
             "ok": False,
@@ -310,78 +656,19 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         _log({"event": "SHADOW_OBSERVE_ERROR", "error": f"{type(exc).__name__}: {exc}"})
 
-    if not plan.get("ready"):
-        return {
-            "ok": True,
-            "reason": str(plan.get("reason") or pair_result.get("reason") or "NO_ENTRY"),
-            "candidate": (plan.get("public_scan") or {}).get("candidate"),
-            "pair_reason": pair_result.get("reason"),
-        }
+    if SETUP_ENGINE_ENABLED:
+        return _try_setup_v2_entry(
+            state,
+            plan,
+            now_ms,
+            str(pair_result.get("reason") or ""),
+        )
 
-    choices = []
-    if plan.get("candidate"):
-        choices.append(plan["candidate"])
-    choices.extend(plan.get("alternatives") or [])
-    selected = None
-    for candidate in choices:
-        symbol = str(candidate.get("symbol") or "").upper()
-        if symbol and not _cooldown_active(state, symbol, now_ms):
-            selected = candidate
-            break
-
-    if selected is None:
-        return {
-            "ok": True,
-            "reason": "ALL_SIGNALS_IN_REENTRY_COOLDOWN",
-            "pair_reason": pair_result.get("reason"),
-        }
-
-    global_ready, global_wait_sec = _global_entry_ready(state, selected, now_ms)
-    if not global_ready:
-        return {
-            "ok": True,
-            "reason": "GLOBAL_ENTRY_PACING",
-            "quality_tier": selected.get("quality_tier"),
-            "quality_score": selected.get("quality_score"),
-            "required_wait_sec": global_wait_sec,
-            "pair_reason": pair_result.get("reason"),
-        }
-
-    result = execute_candidate(dict(selected))
-    if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
-        state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
-        state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 1
-        symbol = str((result.get("candidate") or {}).get("symbol") or "").upper()
-        _set_symbol_cooldown(state, symbol, now_ms)
-        state["last_any_entry_ts_ms"] = now_ms
-        _log({
-            "event": "BOUNDED_SESSION_AUTO_ENTRY",
-            "symbol": symbol,
-            "session_entry_count": state["session_entry_count"],
-            "result": result,
-            "pair_reason": pair_result.get("reason"),
-            "reentry_cooldown_sec": REENTRY_COOLDOWN_SEC,
-            "global_entry_wait_sec": _global_entry_wait_sec(selected),
-            "quality_tier": selected.get("quality_tier"),
-            "quality_score": selected.get("quality_score"),
-        })
-        return {
-            "ok": True,
-            "reason": "AUTO_ENTRY_OPENED",
-            "symbol": symbol,
-            "session_entry_count": state["session_entry_count"],
-        }
-
-    if result.get("reason") == "FUTURES_CANARY_ABORTED":
-        state["stats"]["execution_aborts"] = int(state.get("stats", {}).get("execution_aborts", 0)) + 1
-        if result.get("actual_order_submitted"):
-            state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
-            state["entry_halt_reason"] = "LIVE_ABORT_CIRCUIT_BREAKER"
-            _log({"event": "BOUNDED_SESSION_LIVE_ABORT_HALT", "result": result, "pair_reason": pair_result.get("reason")})
-            return {"ok": False, "reason": "LIVE_ABORT_CIRCUIT_BREAKER"}
-
-    _log({"event": "BOUNDED_SESSION_ENTRY_NOT_OPENED", "result": result, "pair_reason": pair_result.get("reason")})
-    return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
+    return {
+        "ok": True,
+        "reason": "SETUP_ENGINE_DISABLED",
+        "pair_reason": pair_result.get("reason"),
+    }
 
 
 def run_session() -> None:
@@ -398,6 +685,7 @@ def run_session() -> None:
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
     state["session_entry_count"] = 0
+    state["setup_v2"] = {}
     state["symbol_cooldowns"] = {}
     state["last_any_entry_ts_ms"] = 0
     state["consecutive_net_losses"] = 0
@@ -418,6 +706,12 @@ def run_session() -> None:
         "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
         "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
+        "setup_engine_enabled": SETUP_ENGINE_ENABLED,
+        "setup_probe_lookback_min": PROBE_LOOKBACK_MIN,
+        "setup_confirm_lookback_min": CONFIRM_LOOKBACK_MIN,
+        "setup_breakout_buffer_pct": BREAKOUT_BUFFER_PCT,
+        "setup_min_move_pct": MIN_MOVE_FROM_ANCHOR_PCT,
+        "setup_probe_expiry_sec": PROBE_EXPIRY_SEC,
     })
 
     print(
@@ -446,6 +740,7 @@ def run_session() -> None:
             exits = _manage_positions(client, state)
             now_ms = int(time.time() * 1000)
             _apply_exit_cooldowns(state, exits, now_ms)
+            _apply_setup_exit_state(state, exits, now_ms)
             snap = _portfolio_snapshot(client)
             _apply_loss_feedback(
                 state,
@@ -485,7 +780,9 @@ def run_session() -> None:
                 f"open={snap['open_position_count']}/{MAX_OPEN_POSITIONS} | "
                 f"notional=USD {snap['portfolio_notional_usd']:.4f} | "
                 f"entries={state.get('session_entry_count', 0)}/{SESSION_MAX_ENTRIES} | "
-                f"remaining={remaining_sec}s | entry={entry.get('reason')} | exits={len(exits)}"
+                f"remaining={remaining_sec}s | "
+                f"setup={(state.get('setup_v2') or {}).get('stage','IDLE')} | "
+                f"entry={entry.get('reason')} | exits={len(exits)}"
             )
 
             if entry_window_closed_reason and int(snap["open_position_count"]) == 0:
@@ -545,6 +842,15 @@ def status() -> dict[str, Any]:
             "pause_sec": LOSS_STREAK_PAUSE_SEC,
             "soft_session_loss_pct": SESSION_SOFT_LOSS_PCT,
         },
+        "setup_v2": {
+            "enabled": SETUP_ENGINE_ENABLED,
+            "probe_lookback_min": PROBE_LOOKBACK_MIN,
+            "confirm_lookback_min": CONFIRM_LOOKBACK_MIN,
+            "breakout_buffer_pct": BREAKOUT_BUFFER_PCT,
+            "min_move_from_anchor_pct": MIN_MOVE_FROM_ANCHOR_PCT,
+            "probe_expiry_sec": PROBE_EXPIRY_SEC,
+            "max_actual_entries": SESSION_MAX_ENTRIES,
+        },
         "simple_pair_live_enabled": PAIR_LIVE_ENABLED,
         "state": state,
     }
@@ -554,7 +860,8 @@ def selftest() -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
     checks = {
         "duration_60m": SESSION_DURATION_SEC == 3600,
-        "max_entries_10": SESSION_MAX_ENTRIES == 10,
+        "max_entries_2": SESSION_MAX_ENTRIES == 2,
+        "setup_engine_enabled": SETUP_ENGINE_ENABLED,
         "capital_22": SESSION_CAPITAL_USD == 22.0,
         "drawdown_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
         "max_open_4": MAX_OPEN_POSITIONS == 4,
@@ -576,8 +883,10 @@ def selftest() -> dict[str, Any]:
         ) == (False, "SESSION_TIME_LIMIT_REACHED"),
         "count_closed": _entry_allowed(
             now_ms,
-            {"session_deadline_ts_ms": now_ms + 60_000, "session_entry_count": 10},
+            {"session_deadline_ts_ms": now_ms + 60_000, "session_entry_count": 2},
         ) == (False, "SESSION_ENTRY_LIMIT_REACHED"),
+        "setup_probe_shadow_only": PROBE_LOOKBACK_MIN == 3,
+        "setup_confirm_15m": CONFIRM_LOOKBACK_MIN == 15,
     }
     return {"ok": all(checks.values()), "checks": checks}
 

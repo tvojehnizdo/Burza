@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: pip install -r requirements.txt
-      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py kraken_inventory.py dynamic_universe.py fast_canary.py consolidate_usdc.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py futures_canary.py futures_autopilot.py futures_session.py futures_audit.py futures_pairs.py futures_paper_trailing.py futures_shadow_learning.py ai_supervisor.py live_bridge.py
+      - run: python -m py_compile app.py engine.py microstructure.py alpha_discovery.py relative_value.py fx_breakout.py rv_live.py kraken_inventory.py dynamic_universe.py fast_canary.py consolidate_usdc.py history_fetch.py historical_research.py smoke_live.py research.py v4_smoke.py kraken_private.py kraken_live_control.py futures_private.py futures_canary.py futures_autopilot.py futures_session.py futures_audit.py futures_pairs.py futures_paper_trailing.py futures_shadow_learning.py futures_setup_engine.py ai_supervisor.py live_bridge.py
       - run: python -c "import engine, json; r=engine.selftest_report(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python v4_smoke.py | tee v4-smoke.json
       - run: python -c "import kraken_private, json; r=kraken_private.signature_selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
@@ -28,6 +28,7 @@ jobs:
       - run: python -c "import rv_live, json; r=rv_live.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_canary, json; r=futures_canary.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_shadow_learning, json; r=futures_shadow_learning.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+      - run: python -c "import futures_setup_engine, json; r=futures_setup_engine.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_session, json; r=futures_session.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_pairs, json; r=futures_pairs.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
