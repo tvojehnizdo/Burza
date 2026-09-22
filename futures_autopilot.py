@@ -38,7 +38,8 @@ LOOP_SEC = 5
 MIN_PROFIT_HOLD_SEC = 20
 SMALL_PROFIT_AFTER_SEC = 120
 NO_PROGRESS_SEC = 180
-HARD_MAX_HOLD_SEC = 480
+HARD_MAX_HOLD_SEC = 720
+WINNER_HARD_MAX_HOLD_SEC = 1800
 
 QUICK_PROFIT_GROSS_BPS = 45.0
 SMALL_PROFIT_GROSS_BPS = 60.0
@@ -59,7 +60,7 @@ NO_PROGRESS_CURRENT_BPS = 22.0
 
 ADOPT_STOP_BPS = 45.0
 ADOPT_TAKE_BPS = 300.0
-MAX_SESSION_DRAWDOWN_PCT = 50.0
+MAX_SESSION_DRAWDOWN_PCT = 5.0
 SESSION_CAPITAL_USD = 22.0
 MAX_CONSECUTIVE_ERRORS = 5
 
@@ -410,6 +411,7 @@ def _close_position(client: Any, state: dict[str, Any], row: dict[str, Any], rea
             "TRAILING_PROFIT": "trailing_profit_exits",
             "NO_PROGRESS": "no_progress_exits",
             "HARD_MAX_HOLD": "hard_time_exits",
+            "WINNER_MAX_HOLD": "hard_time_exits",
         }.get(reason)
         if key:
             state["stats"][key] = int(state["stats"].get(key, 0)) + 1
@@ -435,16 +437,20 @@ def _trailing_floor_bps(max_fav_bps: float) -> float | None:
 
 
 def _exit_reason(age_sec: float, pnl_bps: float, max_fav_bps: float) -> str | None:
-    if age_sec >= HARD_MAX_HOLD_SEC:
-        return "HARD_MAX_HOLD"
-
     trail_floor = _trailing_floor_bps(max_fav_bps)
     if trail_floor is not None:
-        # Once trailing is armed, let the winner run. Exit only after a
-        # meaningful pullback from the best favorable excursion.
+        # The old manager checked the generic hard timeout first, which capped
+        # exactly the rare tail winners the strategy needs. Once trailing is
+        # armed, manage by high-water pullback and use only a much longer
+        # emergency winner timeout.
         if pnl_bps <= trail_floor:
             return "TRAILING_PROFIT"
+        if age_sec >= WINNER_HARD_MAX_HOLD_SEC:
+            return "WINNER_MAX_HOLD"
         return None
+
+    if age_sec >= HARD_MAX_HOLD_SEC:
+        return "HARD_MAX_HOLD"
 
     if (
         age_sec >= NO_PROGRESS_SEC
