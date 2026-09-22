@@ -41,6 +41,10 @@ ROUND_TRIP_TAKER_COST_BPS = 2.0 * (
 )
 MIN_TAKER_NET_EDGE_BPS = 25.0
 MIN_VOLUME_RATIO = 0.60
+BREAKOUT_VOLUME_RATIO = 1.00
+MAX_EMA6_DISTANCE_ATR = 1.25
+VOL_TARGET_ATR_BPS = 20.0
+MIN_TARGET_NOTIONAL_USD = 2.0
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
@@ -120,6 +124,30 @@ def _signal(symbol: str) -> dict[str, Any]:
     down = last < ema6 < ema20 and r5 < 0 and r15 < 0
     side = "LONG" if up else "SHORT" if down else "NONE"
 
+    prior_high_20 = float(df["high"].iloc[-21:-1].max())
+    prior_low_20 = float(df["low"].iloc[-21:-1].min())
+    breakout = (
+        (side == "LONG" and last >= prior_high_20)
+        or (side == "SHORT" and last <= prior_low_20)
+    )
+    ema6_distance_bps = abs(last / ema6 - 1.0) * 10000.0 if ema6 > 0 else 9999.0
+    ema6_distance_atr = ema6_distance_bps / max(atr_bps, 1e-9)
+    trend_persistent = (
+        (side == "LONG" and r30 > 0 and r60 > 0)
+        or (side == "SHORT" and r30 < 0 and r60 < 0)
+    )
+    continuation_ok = bool(
+        breakout and vol_ratio >= BREAKOUT_VOLUME_RATIO
+    ) or bool(
+        ema6_distance_atr <= MAX_EMA6_DISTANCE_ATR
+    )
+    regime = (
+        "BREAKOUT" if breakout and vol_ratio >= BREAKOUT_VOLUME_RATIO
+        else "TREND_CONTINUATION" if side != "NONE" and continuation_ok
+        else "OVEREXTENDED" if side != "NONE"
+        else "NO_TREND"
+    )
+
     momentum_bps = max(
         abs(r5) * 10000.0 * 0.55,
         abs(r15) * 10000.0 * 0.70,
@@ -144,6 +172,8 @@ def _signal(symbol: str) -> dict[str, Any]:
         side in {"LONG", "SHORT"}
         and confirmations >= 3
         and confidence >= 0.64
+        and trend_persistent
+        and continuation_ok
         and vol_ratio >= MIN_VOLUME_RATIO
         and net_taker_bps >= MIN_TAKER_NET_EDGE_BPS
     )
@@ -166,6 +196,16 @@ def _signal(symbol: str) -> dict[str, Any]:
         "volatility_score": round(volatility_score, 3),
         "volume_ratio": round(vol_ratio, 3),
         "min_volume_ratio": MIN_VOLUME_RATIO,
+        "breakout_volume_ratio": BREAKOUT_VOLUME_RATIO,
+        "prior_high_20": prior_high_20,
+        "prior_low_20": prior_low_20,
+        "breakout": bool(breakout),
+        "ema6_distance_bps": round(ema6_distance_bps, 3),
+        "ema6_distance_atr": round(ema6_distance_atr, 3),
+        "max_ema6_distance_atr": MAX_EMA6_DISTANCE_ATR,
+        "trend_persistent": bool(trend_persistent),
+        "continuation_ok": bool(continuation_ok),
+        "regime": regime,
         "expected_move_proxy_bps": round(expected_bps, 3),
         "taker_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "taker_net_edge_bps": round(net_taker_bps, 3),
@@ -327,6 +367,18 @@ def _position_size(client: Any, symbol: str) -> float:
     return float(position_map(client.open_positions()).get(symbol.upper(), 0.0))
 
 
+def _target_notional_for_signal(signal: dict[str, Any], minimum_notional: float) -> float:
+    """Volatility-managed sizing: keep risk smaller when current ATR is elevated."""
+    try:
+        atr_bps = max(float(signal.get("atr_bps") or 0.0), 1e-9)
+    except Exception:
+        atr_bps = VOL_TARGET_ATR_BPS
+    scale = min(1.0, max(0.40, VOL_TARGET_ATR_BPS / atr_bps))
+    target = TARGET_NOTIONAL_USD * scale
+    target = max(MIN_TARGET_NOTIONAL_USD, target, float(minimum_notional))
+    return min(MAX_NOTIONAL_USD, target)
+
+
 def private_plan() -> dict[str, Any]:
     # Keep the read-only planning policy aligned with the canary constants.
     # This never arms live execution; it only synchronizes risk caps used by
@@ -388,7 +440,7 @@ def private_plan() -> dict[str, Any]:
         csize = contract_size(symbol)
         minimum = min_lot(symbol)
         minimum_notional = minimum * px * csize
-        desired_notional = min(MAX_NOTIONAL_USD, max(TARGET_NOTIONAL_USD, minimum_notional))
+        desired_notional = _target_notional_for_signal(p, minimum_notional)
         raw_size = desired_notional / (px * csize)
         size = round_size_down(symbol, raw_size)
         if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
@@ -445,6 +497,8 @@ def private_plan() -> dict[str, Any]:
             "size": size,
             "mid_price": px,
             "estimated_notional_usd": size * px * csize,
+            "target_notional_usd": desired_notional,
+            "volatility_sizing_scale": round(desired_notional / TARGET_NOTIONAL_USD, 4),
             "equity_usd": equity,
             "notional_cap_usd": notional_cap,
             "stop_price": stop_price,
