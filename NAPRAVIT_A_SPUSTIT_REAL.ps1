@@ -51,7 +51,7 @@ git pull --ff-only
 if ($LASTEXITCODE -ne 0) { throw "git pull selhal." }
 
 Write-Host "[2/6] Kompilace..." -ForegroundColor Cyan
-& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py futures_shadow_learning.py futures_setup_engine.py futures_scale_gate.py futures_setup_research.py
+& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py futures_shadow_learning.py futures_setup_engine.py futures_scale_gate.py futures_setup_research.py futures_microstructure_v4.py
 if ($LASTEXITCODE -ne 0) { throw "Python kompilace selhala." }
 
 Write-Host "[3/6] Selftesty..." -ForegroundColor Cyan
@@ -72,6 +72,9 @@ if ($LASTEXITCODE -ne 0) { throw "Scale gate selftest selhal." }
 
 & $Python -c "import futures_setup_research, json; r=futures_setup_research.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Setup research selftest selhal." }
+
+& $Python -c "import futures_microstructure_v4, json; r=futures_microstructure_v4.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+if ($LASTEXITCODE -ne 0) { throw "V4 microstructure selftest selhal." }
 
 & $Python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Autopilot selftest selhal." }
@@ -124,7 +127,7 @@ Write-Host " - siroky PF trh: top 48 levny prefilter / 28 deep analyza"
 Write-Host " - max spread 20 bps"
 Write-Host " - minimalni modelovany net edge 25 bps"
 Write-Host " - volume ratio minimalne 0.60 pro samostatny signal"
-Write-Host " - Setup V3: LIVE jen z uzavrenych 1m svici a potvrzeneho smeru setupu"
+Write-Host " - Setup V4: uzavrene 1m svicky + orderbook + BTC/ETH leader context + fresh taker flow"
 Write-Host " - 3min breakout je pouze SHADOW PROBE, bez realne objednavky"
 Write-Host " - LIVE vstup az po potvrzenem 15min range breakoutu"
 Write-Host " - breakout buffer 0.05 %, minimalni pohyb od anchoru 0.35 %"
@@ -132,12 +135,14 @@ Write-Host " - po uzavreni prvniho obchodu je povolen max 1 potvrzeny reversal p
 Write-Host " - max 2 skutecne vstupy za session: FIRST + REVERSAL"
 Write-Host " - breakout s objemem nebo neprestreleny trend-continuation vstup"
 Write-Host " - volatility-managed size cca 2-5 USD podle ATR"
-Write-Host " - market breadth nesmi byt proti smeru + taker-flow musi byt cerstvy a potvrzeny"
+Write-Host " - market breadth nesmi byt proti; BTC+ETH nesmi souhlasne tlacit opacne"
+Write-Host " - Futures L2 orderbook: extremni opacny tlak = veto; souhlasny tlak zvysuje ranking"
+Write-Host " - maker-first vstup: post-only na touch; ELITE ceka max ~0.45 s, ostatni max ~1.5 s; pak bezpecny taker fallback"
 Write-Host " - jeden aktivni setup; zadne sekani trhu mnoha nezavislymi vstupy"
 Write-Host " - puvodni quality/microstructure filtry zustavaji jako potvrzeni setupu"
 Write-Host " - TWO_SIDED trh dovoluje LONG i SHORT bez vynuceneho parovani"
 Write-Host " - jednoduche korelacni pary pouze SHADOW; robustni RV oddelene"
-Write-Host " - base target 5 USD; vyssi notional se odemkne jen po prokazanych V3 vysledcich; absolutni cap 10 USD / 35 % equity"
+Write-Host " - base target 5 USD; vyssi notional se odemkne jen po auditovanem profit evidence; cap 10 USD / 35 % Futures equity"
 Write-Host " - STOP cca 45 bps; failed breakout se zavira po potvrzenem navratu do range"
 Write-Host " - trailing od +45 bps; aktivni winner uz neni useknut generic 8min timeoutem"
 Write-Host " - ratchet gap 18 -> 14 -> 10 -> 8 -> 6 bps"
