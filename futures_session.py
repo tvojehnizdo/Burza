@@ -37,6 +37,8 @@ from futures_private import save_policy
 
 SESSION_DURATION_SEC = 60 * 60
 SESSION_MAX_ENTRIES = 10
+REENTRY_COOLDOWN_SEC = 300
+PAIR_LIVE_ENABLED = False
 
 
 def _session_policy_disarm() -> None:
@@ -59,6 +61,26 @@ def _entry_allowed(now_ms: int, state: dict[str, Any]) -> tuple[bool, str]:
 PAIR_SCAN_INTERVAL_SEC = 60
 
 
+def _cooldown_active(state: dict[str, Any], symbol: str, now_ms: int) -> bool:
+    cooldowns = state.get("symbol_cooldowns") or {}
+    try:
+        return now_ms < int(cooldowns.get(str(symbol).upper()) or 0)
+    except Exception:
+        return False
+
+
+def _set_symbol_cooldown(state: dict[str, Any], symbol: str, now_ms: int) -> None:
+    cooldowns = state.setdefault("symbol_cooldowns", {})
+    cooldowns[str(symbol).upper()] = int(now_ms + REENTRY_COOLDOWN_SEC * 1000)
+
+
+def _apply_exit_cooldowns(state: dict[str, Any], exits: list[dict[str, Any]], now_ms: int) -> None:
+    for row in exits:
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol:
+            _set_symbol_cooldown(state, symbol, now_ms)
+
+
 def _rollback_pair_leg(client: Any, state: dict[str, Any], symbol: str, reason: str) -> dict[str, Any]:
     row = _position_rows_map(client.open_positions()).get(symbol.upper())
     if row is None:
@@ -68,6 +90,32 @@ def _rollback_pair_leg(client: Any, state: dict[str, Any], symbol: str, reason: 
 
 def _try_pair_entry(state: dict[str, Any]) -> dict[str, Any]:
     now_ms = int(time.time() * 1000)
+    if not PAIR_LIVE_ENABLED:
+        last_pair_scan = int(state.get("last_pair_scan_ts_ms") or 0)
+        if now_ms - last_pair_scan < PAIR_SCAN_INTERVAL_SEC * 1000:
+            return {"ok": True, "reason": "PAIR_SHADOW_COOLDOWN"}
+        state["last_pair_scan_ts_ms"] = now_ms
+        try:
+            scan = public_scan()
+            symbols = [str(x).upper() for x in scan.get("symbols", []) if x]
+            pairs = scan_pairs(symbols) if len(symbols) >= 2 else {"top": []}
+            top = (pairs.get("top") or [])[:5]
+            _log({
+                "event": "PAIR_SHADOW_SCAN",
+                "live_execution": False,
+                "candidate_count": len(pairs.get("top") or []),
+                "top": top,
+            })
+            return {
+                "ok": True,
+                "reason": "PAIR_SHADOW_ONLY",
+                "candidate_count": len(pairs.get("top") or []),
+                "top": top,
+            }
+        except Exception as exc:
+            _log({"event": "PAIR_SHADOW_ERROR", "error": f"{type(exc).__name__}: {exc}"})
+            return {"ok": True, "reason": "PAIR_SHADOW_ERROR"}
+
     if int(state.get("session_entry_count") or 0) > SESSION_MAX_ENTRIES - 2:
         return {"ok": True, "reason": "PAIR_ENTRY_BUDGET_FULL"}
 
@@ -180,17 +228,37 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
             "pair_reason": pair_result.get("reason"),
         }
 
-    result = execute()
+    choices = []
+    if plan.get("candidate"):
+        choices.append(plan["candidate"])
+    choices.extend(plan.get("alternatives") or [])
+    selected = None
+    for candidate in choices:
+        symbol = str(candidate.get("symbol") or "").upper()
+        if symbol and not _cooldown_active(state, symbol, now_ms):
+            selected = candidate
+            break
+
+    if selected is None:
+        return {
+            "ok": True,
+            "reason": "ALL_SIGNALS_IN_REENTRY_COOLDOWN",
+            "pair_reason": pair_result.get("reason"),
+        }
+
+    result = execute_candidate(dict(selected))
     if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
         state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
         state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 1
         symbol = str((result.get("candidate") or {}).get("symbol") or "").upper()
+        _set_symbol_cooldown(state, symbol, now_ms)
         _log({
             "event": "BOUNDED_SESSION_AUTO_ENTRY",
             "symbol": symbol,
             "session_entry_count": state["session_entry_count"],
             "result": result,
             "pair_reason": pair_result.get("reason"),
+            "reentry_cooldown_sec": REENTRY_COOLDOWN_SEC,
         })
         return {
             "ok": True,
@@ -225,6 +293,7 @@ def run_session() -> None:
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
     state["session_entry_count"] = 0
+    state["symbol_cooldowns"] = {}
     state.pop("entry_halt_reason", None)
     state["session_capital_usd"] = min(SESSION_CAPITAL_USD, float(initial["equity_usd"]))
     _save_state(state)
@@ -266,6 +335,8 @@ def run_session() -> None:
                 return
 
             exits = _manage_positions(client, state)
+            now_ms = int(time.time() * 1000)
+            _apply_exit_cooldowns(state, exits, now_ms)
             snap = _portfolio_snapshot(client)
 
             now_ms = int(time.time() * 1000)
@@ -337,6 +408,8 @@ def status() -> dict[str, Any]:
         "max_portfolio_notional_pct_equity": MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
         "session_capital_usd": SESSION_CAPITAL_USD,
         "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
+        "reentry_cooldown_sec": REENTRY_COOLDOWN_SEC,
+        "simple_pair_live_enabled": PAIR_LIVE_ENABLED,
         "state": state,
     }
 
