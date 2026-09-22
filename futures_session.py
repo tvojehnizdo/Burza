@@ -846,6 +846,7 @@ def run_session() -> None:
     initial = _portfolio_snapshot(client)
     now_ms = int(time.time() * 1000)
 
+    state["strategy_version"] = "SETUP_V3_PROFIT_SCALE"
     state["session_start_equity"] = float(initial["equity_usd"])
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
@@ -862,6 +863,7 @@ def run_session() -> None:
 
     _log({
         "event": "BOUNDED_SESSION_START",
+        "strategy_version": state["strategy_version"],
         "session_start_equity": state["session_start_equity"],
         "session_capital_usd": state["session_capital_usd"],
         "session_duration_sec": SESSION_DURATION_SEC,
