@@ -982,7 +982,7 @@ def selftest() -> dict[str, Any]:
         "max_entries_2": SESSION_MAX_ENTRIES == 2,
         "setup_engine_enabled": SETUP_ENGINE_ENABLED,
         "capital_22": SESSION_CAPITAL_USD == 22.0,
-        "drawdown_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "drawdown_5": MAX_SESSION_DRAWDOWN_PCT == 5.0,
         "max_open_4": MAX_OPEN_POSITIONS == 4,
         "adaptive_pacing": (
             GLOBAL_ENTRY_ELITE_SEC < GLOBAL_ENTRY_STRONG_SEC < GLOBAL_ENTRY_BASE_SEC
