@@ -1306,10 +1306,10 @@ def selftest() -> dict[str, Any]:
         "breadth_alignment": 1,
     }
     aligned = _quality_profile(signal, {
-        "available": True, "trade_count": 30, "flow_imbalance": 0.40,
+        "available": True, "fresh": True, "trade_count": 30, "flow_imbalance": 0.40,
     })
     opposing = _quality_profile(signal, {
-        "available": True, "trade_count": 30, "flow_imbalance": -0.50,
+        "available": True, "fresh": True, "trade_count": 30, "flow_imbalance": -0.50,
     })
     low_vol_size = _target_notional_for_signal({"atr_bps": 12.0}, 0.1)
     high_vol_size = _target_notional_for_signal({"atr_bps": 50.0}, 0.1)
