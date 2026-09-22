@@ -521,6 +521,18 @@ def _apply_setup_exit_state(
         if str(row.get("symbol") or "").upper() != symbol:
             continue
         stage = str(setup.get("stage") or "")
+        gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
+        _log({
+            "event": "SETUP_V3_TRADE_RESULT",
+            "symbol": symbol,
+            "setup_stage": stage,
+            "exit_reason": row.get("exit_reason"),
+            "gross_bps": gross_bps,
+            "approx_net_bps": gross_bps - ROUND_TRIP_TAKER_COST_BPS,
+            "quality_tier": setup.get("live_quality_tier"),
+            "quality_score": setup.get("live_quality_score"),
+            "setup_opportunity_score": setup.get("setup_opportunity_score"),
+        })
         if stage == "FIRST_LIVE":
             setup["stage"] = "WAIT_REVERSAL"
             setup["first_live_closed"] = True
