@@ -689,6 +689,7 @@ def status() -> dict[str, Any]:
             },
             "no_progress_sec": NO_PROGRESS_SEC,
             "hard_max_hold_sec": HARD_MAX_HOLD_SEC,
+            "winner_hard_max_hold_sec": WINNER_HARD_MAX_HOLD_SEC,
             "max_open_positions": MAX_OPEN_POSITIONS,
             "max_trade_notional_usd": MAX_NOTIONAL_USD,
             "max_portfolio_notional_usd": MAX_PORTFOLIO_NOTIONAL_USD,
@@ -717,7 +718,9 @@ def selftest() -> dict[str, Any]:
         ),
         "small_profit": _exit_reason(121, 61.0, 40.0) == "SMALL_PROFIT",
         "no_progress": _exit_reason(181, 5.0, 15.0) == "NO_PROGRESS",
-        "hard_max": _exit_reason(481, 100.0, 100.0) == "HARD_MAX_HOLD",
+        "hard_max": _exit_reason(HARD_MAX_HOLD_SEC + 1, 10.0, 10.0) == "HARD_MAX_HOLD",
+        "trailed_winner_survives_generic_hard_max": _exit_reason(HARD_MAX_HOLD_SEC + 1, 60.0, 70.0) is None,
+        "winner_emergency_timeout": _exit_reason(WINNER_HARD_MAX_HOLD_SEC + 1, 60.0, 70.0) == "WINNER_MAX_HOLD",
         "no_early_exit": _exit_reason(10, 100.0, 100.0) is None,
         "constants_sane": (
             QUICK_PROFIT_GROSS_BPS > 20.0
@@ -725,7 +728,7 @@ def selftest() -> dict[str, Any]:
             and NO_PROGRESS_SEC < HARD_MAX_HOLD_SEC
             and MAX_OPEN_POSITIONS == 4
         ),
-        "drawdown_limit_is_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
+        "drawdown_limit_is_5": MAX_SESSION_DRAWDOWN_PCT == 5.0,
         "capital_budget_is_22": SESSION_CAPITAL_USD == 22.0,
     }
     return {"ok": all(checks.values()), "checks": checks}
