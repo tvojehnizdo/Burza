@@ -1424,7 +1424,7 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         try:
             try:
                 from futures_private import cancel_symbol_orders
-                cancel_symbol_orders(client, symbol, reduce_only_only=True)
+                cancel_symbol_orders(client, symbol, reduce_only_only=False)
             except Exception:
                 pass
             visible = _position_size(client, symbol)
