@@ -10,8 +10,8 @@ from typing import Any
 
 import requests
 
-from futures_private import client_from_env, readiness
-from futures_scale_gate import evidence as setup_v3_scale_evidence
+from futures_private import client_from_env, contract_size, readiness
+from futures_scale_gate import append_audited_result, evidence as setup_v3_scale_evidence
 
 REPORT_DIR = Path("reports")
 AUTOPILOT_LOG = Path("data/futures_autopilot_events.jsonl")
@@ -587,6 +587,32 @@ def main() -> None:
     ]
     exit_counts, exit_rows = _exit_reason_map(auto_events, since_ms)
     _attach_exit_reasons(trades, exit_rows)
+
+    if str(state.get("strategy_version") or "") == "SETUP_V3_PROFIT_SCALE":
+        for trade in trades:
+            symbol = str(trade.get("symbol") or "").upper()
+            entry_price = _num(trade.get("entry_price"), 0.0)
+            entry_size = abs(_num(trade.get("entry_size"), 0.0))
+            try:
+                notional = entry_price * entry_size * contract_size(symbol)
+            except Exception:
+                notional = 0.0
+            if notional <= 0:
+                continue
+            net_usd = _num(trade.get("net_after_fee"), 0.0)
+            append_audited_result({
+                "trade_key": f"{symbol}:{int(trade.get('open_ts_ms') or 0)}:{int(trade.get('close_ts_ms') or 0)}",
+                "symbol": symbol,
+                "side": trade.get("side"),
+                "open_ts_ms": trade.get("open_ts_ms"),
+                "close_ts_ms": trade.get("close_ts_ms"),
+                "entry_notional_usd": round(notional, 8),
+                "net_usd": round(net_usd, 8),
+                "net_bps": round(net_usd / notional * 10000.0, 4),
+                "exit_reason": trade.get("exit_reason"),
+                "quality_tier": trade.get("quality_tier"),
+                "quality_score": trade.get("quality_score"),
+            })
 
     summary = _summary(trades)
     exchange_diag = _event_diagnostics(exchange_events)
