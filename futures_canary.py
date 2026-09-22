@@ -1185,6 +1185,42 @@ def live_status() -> dict[str, Any]:
     }
 
 
+def selftest() -> dict[str, Any]:
+    breadth = _market_breadth([
+        {"side": "LONG", "trend_persistent": True},
+        {"side": "LONG", "trend_persistent": True},
+        {"side": "LONG", "trend_persistent": True},
+        {"side": "SHORT", "trend_persistent": True},
+    ])
+    signal = {
+        "side": "LONG",
+        "confidence": 0.90,
+        "taker_net_edge_bps": 70.0,
+        "volume_ratio": 1.4,
+        "breakout": True,
+        "continuation_ok": True,
+        "breadth_alignment": 1,
+    }
+    aligned = _quality_profile(signal, {
+        "available": True, "trade_count": 30, "flow_imbalance": 0.40,
+    })
+    opposing = _quality_profile(signal, {
+        "available": True, "trade_count": 30, "flow_imbalance": -0.50,
+    })
+    low_vol_size = _target_notional_for_signal({"atr_bps": 12.0}, 0.1)
+    high_vol_size = _target_notional_for_signal({"atr_bps": 50.0}, 0.1)
+    checks = {
+        "breadth_bull": breadth["regime"] == "BULL_BREADTH",
+        "aligned_flow_passes": bool(aligned["microstructure_ok"]),
+        "opposing_flow_vetoes": not bool(opposing["microstructure_ok"]),
+        "quality_orders_flow": float(aligned["quality_score"]) > float(opposing["quality_score"]),
+        "volatility_reduces_size": high_vol_size < low_vol_size,
+        "broad_universe": UNIVERSE_PREFILTER > MAX_UNIVERSE >= 20,
+        "scan_cache_positive": PUBLIC_SCAN_CACHE_SEC > 0,
+    }
+    return {"ok": all(checks.values()), "checks": checks}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--public", action="store_true")
@@ -1192,9 +1228,13 @@ def main() -> None:
     ap.add_argument("--execute", action="store_true")
     ap.add_argument("--rescue", action="store_true")
     ap.add_argument("--status", action="store_true")
+    ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--confirm", default="")
     args = ap.parse_args()
 
+    if args.selftest:
+        print(json.dumps(selftest(), indent=2, ensure_ascii=False, default=str))
+        return
     if args.status:
         print(json.dumps(live_status(), indent=2, ensure_ascii=False, default=str))
         return
