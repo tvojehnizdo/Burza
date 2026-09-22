@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from futures_canary import ROUND_TRIP_TAKER_COST_BPS
+from futures_canary import INVERT_DIRECTION, ROUND_TRIP_TAKER_COST_BPS, execution_signal_side
 
 STATE_PATH = Path("data/futures_shadow_learning_state.json")
 EVENT_LOG = Path("data/futures_shadow_learning_events.jsonl")
@@ -134,12 +134,13 @@ def observe_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
     for row in rows[:OBSERVE_TOP_N]:
         symbol = str(row.get("symbol") or "").upper()
-        side = str(row.get("side") or "").upper()
+        base_side = str(row.get("side") or "").upper()
+        execution_side = execution_signal_side(base_side)
         price = _num(row.get("price"), 0.0)
-        if not symbol or side not in {"LONG", "SHORT"} or price <= 0:
+        if not symbol or base_side not in {"LONG", "SHORT"} or price <= 0:
             continue
 
-        key = f"{symbol}|{side}"
+        key = f"{symbol}|{base_side}|{'INV' if INVERT_DIRECTION else 'BASE'}"
         last = int((state.get("last_seen") or {}).get(key) or 0)
         if now_ms - last < DEDUPE_SEC * 1000:
             continue
@@ -150,10 +151,13 @@ def observe_plan(plan: dict[str, Any]) -> dict[str, Any]:
             q = {}
 
         obs = {
-            "id": f"{now_ms}-{symbol}-{side}",
+            "id": f"{now_ms}-{symbol}-{execution_side}",
             "observed_ts_ms": now_ms,
             "symbol": symbol,
-            "side": side,
+            "side": execution_side,
+            "base_side": base_side,
+            "execution_side": execution_side,
+            "direction_inverted": INVERT_DIRECTION,
             "entry_mid": price,
             "signal_ready": bool(row.get("canary_signal_ready")),
             "confidence": _num(row.get("confidence"), 0.0),
@@ -210,6 +214,9 @@ def build_report(state: dict[str, Any] | None = None) -> dict[str, Any]:
             resolved.append({
                 "symbol": obs.get("symbol"),
                 "side": obs.get("side"),
+                "base_side": obs.get("base_side"),
+                "execution_side": obs.get("execution_side"),
+                "direction_inverted": obs.get("direction_inverted"),
                 "signal_ready": obs.get("signal_ready"),
                 "regime": obs.get("regime"),
                 "market_regime": obs.get("market_regime"),
@@ -218,13 +225,15 @@ def build_report(state: dict[str, Any] | None = None) -> dict[str, Any]:
                 "horizon_sec": int(horizon_key),
                 "gross_bps": result.get("gross_bps"),
                 "net_bps": result.get("net_bps"),
+                "base_gross_bps": result.get("base_gross_bps"),
+                "base_net_bps": result.get("base_net_bps"),
             })
 
     groups: dict[str, dict[str, Any]] = {}
     for horizon in HORIZONS_SEC:
         hr = [x for x in resolved if int(x["horizon_sec"]) == horizon]
         groups[f"h{horizon}_all"] = _bucket(hr)
-        for field in ("quality_tier", "regime", "market_regime", "side"):
+        for field in ("quality_tier", "regime", "market_regime", "side", "direction_inverted"):
             values = sorted({str(x.get(field) or "UNKNOWN") for x in hr})
             for value in values:
                 groups[f"h{horizon}_{field}_{value}"] = _bucket(
@@ -238,6 +247,7 @@ def build_report(state: dict[str, Any] | None = None) -> dict[str, Any]:
         "modeled_round_trip_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "horizons_sec": list(HORIZONS_SEC),
         "groups": groups,
+        "inverse_mode_active": INVERT_DIRECTION,
     }
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -279,12 +289,15 @@ def resolve_due() -> dict[str, Any]:
             key = str(horizon)
             if age_sec < horizon or key in horizons:
                 continue
-            gross = _directional_bps(str(obs.get("side") or ""), _num(obs.get("entry_mid"), 0.0), current)
+            gross = _directional_bps(str(obs.get("execution_side") or obs.get("side") or ""), _num(obs.get("entry_mid"), 0.0), current)
+            base_gross = _directional_bps(str(obs.get("base_side") or obs.get("side") or ""), _num(obs.get("entry_mid"), 0.0), current)
             result = {
                 "resolved_ts_ms": now_ms,
                 "exit_mid": current,
                 "gross_bps": round(gross, 3),
                 "net_bps": round(gross - ROUND_TRIP_TAKER_COST_BPS, 3),
+                "base_gross_bps": round(base_gross, 3),
+                "base_net_bps": round(base_gross - ROUND_TRIP_TAKER_COST_BPS, 3),
             }
             horizons[key] = result
             resolved_count += 1
@@ -292,6 +305,9 @@ def resolve_due() -> dict[str, Any]:
                 "id": obs.get("id"),
                 "symbol": symbol,
                 "side": obs.get("side"),
+                "base_side": obs.get("base_side"),
+                "execution_side": obs.get("execution_side"),
+                "direction_inverted": obs.get("direction_inverted"),
                 "horizon_sec": horizon,
                 **result,
             })
@@ -316,6 +332,10 @@ def selftest() -> dict[str, Any]:
         "bucket_count": b["n"] == 3,
         "bucket_hit_rate": abs(float(b["hit_rate"]) - (2.0 / 3.0)) < 1e-4,
         "horizons": HORIZONS_SEC == (60, 180, 300, 600),
+        "inverse_mapping": (
+            execution_signal_side("LONG") == ("SHORT" if INVERT_DIRECTION else "LONG")
+            and execution_signal_side("SHORT") == ("LONG" if INVERT_DIRECTION else "SHORT")
+        ),
     }
     return {"ok": all(checks.values()), "checks": checks}
 
