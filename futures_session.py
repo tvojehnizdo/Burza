@@ -134,6 +134,14 @@ def _apply_loss_feedback(
     streak = int(state.get("consecutive_net_losses") or 0)
 
     for row in exits:
+        if bool(row.get("pnl_unknown")):
+            _log({
+                "event": "SESSION_EXIT_FEEDBACK_SKIPPED",
+                "symbol": row.get("symbol"),
+                "exit_reason": row.get("exit_reason"),
+                "reason": "PNL_UNKNOWN",
+            })
+            continue
         gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
         approx_net_bps = gross_bps - ROUND_TRIP_TAKER_COST_BPS
         if approx_net_bps <= 0:
@@ -462,6 +470,35 @@ def _setup_live_abort(
     return {"ok": False, "reason": str(result.get("reason") or "ENTRY_FAILED")}
 
 
+def _detect_setup_exchange_close(
+    client: Any,
+    state: dict[str, Any],
+    exits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Advance setup state when exchange STOP/TP closed a leg between manager polls."""
+    setup = state.get("setup_v2")
+    if not isinstance(setup, dict) or str(setup.get("stage") or "") not in {"FIRST_LIVE", "REVERSAL_LIVE"}:
+        return []
+    symbol = str(setup.get("symbol") or "").upper()
+    if not symbol:
+        return []
+    if any(str(x.get("symbol") or "").upper() == symbol for x in exits):
+        return []
+    if symbol in _position_rows_map(client.open_positions()):
+        return []
+
+    result = {
+        "ok": True,
+        "reason": "EXCHANGE_POSITION_GONE",
+        "symbol": symbol,
+        "exit_reason": "EXCHANGE_PROTECTION_OR_EXTERNAL",
+        "pnl_bps_before_close": None,
+        "pnl_unknown": True,
+    }
+    _log({"event": "SETUP_V3_EXCHANGE_CLOSE_DETECTED", **result, "setup": setup})
+    return [result]
+
+
 def _setup_invalidation_exit(client: Any, state: dict[str, Any]) -> list[dict[str, Any]]:
     setup = state.get("setup_v2")
     if not isinstance(setup, dict) or str(setup.get("stage") or "") not in {"FIRST_LIVE", "REVERSAL_LIVE"}:
@@ -521,18 +558,19 @@ def _apply_setup_exit_state(
         if str(row.get("symbol") or "").upper() != symbol:
             continue
         stage = str(setup.get("stage") or "")
-        gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
-        _log({
-            "event": "SETUP_V3_TRADE_RESULT",
-            "symbol": symbol,
-            "setup_stage": stage,
-            "exit_reason": row.get("exit_reason"),
-            "gross_bps": gross_bps,
-            "approx_net_bps": gross_bps - ROUND_TRIP_TAKER_COST_BPS,
-            "quality_tier": setup.get("live_quality_tier"),
-            "quality_score": setup.get("live_quality_score"),
-            "setup_opportunity_score": setup.get("setup_opportunity_score"),
-        })
+        if not bool(row.get("pnl_unknown")):
+            gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
+            _log({
+                "event": "SETUP_V3_TRADE_RESULT",
+                "symbol": symbol,
+                "setup_stage": stage,
+                "exit_reason": row.get("exit_reason"),
+                "gross_bps": gross_bps,
+                "approx_net_bps": gross_bps - ROUND_TRIP_TAKER_COST_BPS,
+                "quality_tier": setup.get("live_quality_tier"),
+                "quality_score": setup.get("live_quality_score"),
+                "setup_opportunity_score": setup.get("setup_opportunity_score"),
+            })
         if stage == "FIRST_LIVE":
             setup["stage"] = "WAIT_REVERSAL"
             setup["first_live_closed"] = True
@@ -865,6 +903,7 @@ def run_session() -> None:
                 return
 
             exits = _manage_positions(client, state)
+            exits.extend(_detect_setup_exchange_close(client, state, exits))
             exits.extend(_setup_invalidation_exit(client, state))
             now_ms = int(time.time() * 1000)
             _apply_exit_cooldowns(state, exits, now_ms)
