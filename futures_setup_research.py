@@ -226,17 +226,30 @@ def research_symbol(
             pre_hold_robust = (
                 float(train["mean_net_bps"] or -999.0) > 0
                 and float(valid["mean_net_bps"] or -999.0) > 0
-                and float(train["profit_factor"] or 0.0) > 1.0
-                and float(valid["profit_factor"] or 0.0) > 1.0
+                and float(train["median_net_bps"] or -999.0) > 0
+                and float(valid["median_net_bps"] or -999.0) > 0
+                and float(train["profit_factor"] or 0.0) >= 1.15
+                and float(valid["profit_factor"] or 0.0) >= 1.15
+                and float(train["hit_rate"] or 0.0) >= 0.52
+                and float(valid["hit_rate"] or 0.0) >= 0.52
             )
             holdout_pass = (
                 float(hold["mean_net_bps"] or -999.0) > 0
+                and float(hold["median_net_bps"] or -999.0) > 0
                 and float(hold["profit_factor"] or 0.0) > 1.0
+                and float(hold["hit_rate"] or 0.0) >= 0.50
             )
             worst_pre_hold = min(
                 float(train["mean_net_bps"] or -999.0),
                 float(valid["mean_net_bps"] or -999.0),
             )
+            noise = max(
+                float(train["stdev_bps"] or 0.0),
+                float(valid["stdev_bps"] or 0.0),
+                1.0,
+            )
+            n_eff = min(int(train["n"]), int(valid["n"]))
+            robust_score = worst_pre_hold * math.sqrt(n_eff) / noise
             results.append({
                 "symbol": symbol,
                 "params": {
@@ -254,7 +267,7 @@ def research_symbol(
                 "pre_hold_robust": pre_hold_robust,
                 "holdout_pass": holdout_pass,
                 "promotion_candidate": bool(pre_hold_robust and holdout_pass),
-                "robust_score": round(worst_pre_hold, 4),
+                "robust_score": round(robust_score, 4),
             })
 
     promotable = [x for x in results if x["promotion_candidate"]]
