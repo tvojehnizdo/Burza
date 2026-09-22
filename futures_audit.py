@@ -152,6 +152,8 @@ def _signal_events(canary: list[dict[str, Any]], since_ms: int) -> list[dict[str
         cand = e.get("candidate") or {}
         if not isinstance(cand, dict):
             continue
+        source = cand.get("source_signal") if isinstance(cand.get("source_signal"), dict) else {}
+        micro = cand.get("microstructure") if isinstance(cand.get("microstructure"), dict) else {}
         out.append({
             "ts_ms": ts,
             "symbol": str(cand.get("symbol") or "").upper(),
@@ -161,6 +163,13 @@ def _signal_events(canary: list[dict[str, Any]], since_ms: int) -> list[dict[str
             "confidence": _num(cand.get("confidence"), 0.0),
             "planned_stop": _num(cand.get("stop_price"), 0.0),
             "planned_take": _num(cand.get("take_profit_price"), 0.0),
+            "quality_tier": str(cand.get("quality_tier") or "UNRATED"),
+            "quality_score": _num(cand.get("quality_score"), 0.0),
+            "regime": str(source.get("regime") or "UNKNOWN"),
+            "market_regime": str(source.get("market_regime") or "UNKNOWN"),
+            "breakout": bool(source.get("breakout")),
+            "breadth_alignment": int(source.get("breadth_alignment") or 0),
+            "micro_aligned_flow": _num(micro.get("aligned_flow"), 0.0),
         })
     return out
 
@@ -246,6 +255,13 @@ def _trade_roundtrips(events: list[dict[str, Any]], signals: list[dict[str, Any]
                 cur["signal_mid"] = sig["signal_mid"]
                 cur["planned_stop"] = sig["planned_stop"]
                 cur["planned_take"] = sig["planned_take"]
+                cur["quality_tier"] = sig.get("quality_tier")
+                cur["quality_score"] = sig.get("quality_score")
+                cur["regime"] = sig.get("regime")
+                cur["market_regime"] = sig.get("market_regime")
+                cur["breakout"] = sig.get("breakout")
+                cur["breadth_alignment"] = sig.get("breadth_alignment")
+                cur["micro_aligned_flow"] = sig.get("micro_aligned_flow")
                 if sig["signal_mid"] > 0 and cur["entry_price"] > 0:
                     direction = 1.0 if cur["side"] == "long" else -1.0
                     cur["entry_slippage_bps"] = direction * (
@@ -392,6 +408,34 @@ def _summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+
+def _group_performance(trades: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for trade in trades:
+        groups[str(trade.get(key) or "UNKNOWN")].append(trade)
+
+    out: dict[str, Any] = {}
+    for name, rows in sorted(groups.items()):
+        nets = [_num(x.get("net_after_fee")) for x in rows]
+        wins = sum(1 for x in nets if x > 0)
+        out[name] = {
+            "trades": len(rows),
+            "wins": wins,
+            "win_rate_pct": round(wins / len(rows) * 100.0, 2) if rows else None,
+            "net_after_fee": round(sum(nets), 8),
+            "avg_net_after_fee": round(statistics.mean(nets), 8) if nets else None,
+            "avg_mfe_bps": round(
+                statistics.mean([_num(x.get("mfe_bps")) for x in rows if x.get("mfe_bps") is not None]),
+                2,
+            ) if any(x.get("mfe_bps") is not None for x in rows) else None,
+            "avg_mae_bps": round(
+                statistics.mean([_num(x.get("mae_bps")) for x in rows if x.get("mae_bps") is not None]),
+                2,
+            ) if any(x.get("mae_bps") is not None for x in rows) else None,
+        }
+    return out
+
+
 def _recommendations(summary: dict[str, Any], trades: list[dict[str, Any]], exit_counts: Counter) -> list[str]:
     out: list[str] = []
     n = int(summary.get("completed_trades") or 0)
@@ -449,6 +493,19 @@ def _md(report: dict[str, Any]) -> str:
     ]
     for k, v in report["exit_reasons"].items():
         lines.append(f"- {k}: {v}")
+
+    lines += ["", "## Performance by signal class", ""]
+    for group_name, group_rows in (report.get("performance_by") or {}).items():
+        lines.append(f"### {group_name}")
+        if not group_rows:
+            lines.append("- no data")
+            continue
+        for name, stats in group_rows.items():
+            lines.append(
+                f"- {name}: n={stats.get('trades')}, win={stats.get('win_rate_pct')}%, "
+                f"net={stats.get('net_after_fee')}, avg={stats.get('avg_net_after_fee')}, "
+                f"MFE/MAE={stats.get('avg_mfe_bps')}/{stats.get('avg_mae_bps')} bps"
+            )
 
     lines += ["", "## Trades", ""]
     if report["trades"]:
@@ -554,6 +611,13 @@ def main() -> None:
         "exchange_event_diagnostics": exchange_diag,
         "local_exit_attempts": exit_rows,
         "summary": summary,
+        "performance_by": {
+            "quality_tier": _group_performance(trades, "quality_tier"),
+            "regime": _group_performance(trades, "regime"),
+            "market_regime": _group_performance(trades, "market_regime"),
+            "side": _group_performance(trades, "side"),
+            "breakout": _group_performance(trades, "breakout"),
+        },
         "exit_reasons": dict(exit_counts),
         "trades": trades,
         "audit_anomalies": anomalies,
