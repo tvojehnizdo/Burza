@@ -553,7 +553,7 @@ def _md(report: dict[str, Any]) -> str:
         )
 
     scale = report.get("setup_v3_scale_evidence") or {}
-    lines += ["", "## Setup V3 scale evidence", ""]
+    lines += ["", "## Evidence-gated scale", ""]
     lines.append(
         f"- closed={scale.get('closed_setup_v3_trades')} | tier={scale.get('scale_tier')} | "
         f"multiplier={scale.get('scale_multiplier')} | PF={scale.get('profit_factor')} | "
@@ -588,7 +588,7 @@ def main() -> None:
     exit_counts, exit_rows = _exit_reason_map(auto_events, since_ms)
     _attach_exit_reasons(trades, exit_rows)
 
-    if str(state.get("strategy_version") or "") == "SETUP_V3_PROFIT_SCALE":
+    if str(state.get("strategy_version") or "") in {"SETUP_V3_PROFIT_SCALE", "SETUP_V4_MICRO_MAKER"}:
         for trade in trades:
             symbol = str(trade.get("symbol") or "").upper()
             entry_price = _num(trade.get("entry_price"), 0.0)
@@ -652,6 +652,7 @@ def main() -> None:
         "exchange_event_diagnostics": exchange_diag,
         "local_exit_attempts": exit_rows,
         "summary": summary,
+        "strategy_version": state.get("strategy_version"),
         "setup_v3_scale_evidence": setup_v3_scale_evidence(),
         "performance_by": {
             "quality_tier": _group_performance(trades, "quality_tier"),
