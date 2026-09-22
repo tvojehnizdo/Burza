@@ -51,7 +51,7 @@ git pull --ff-only
 if ($LASTEXITCODE -ne 0) { throw "git pull selhal." }
 
 Write-Host "[2/6] Kompilace..." -ForegroundColor Cyan
-& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py futures_shadow_learning.py
+& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py futures_shadow_learning.py futures_setup_engine.py
 if ($LASTEXITCODE -ne 0) { throw "Python kompilace selhala." }
 
 Write-Host "[3/6] Selftesty..." -ForegroundColor Cyan
@@ -63,6 +63,9 @@ if ($LASTEXITCODE -ne 0) { throw "Canary selftest selhal." }
 
 & $Python -c "import futures_shadow_learning, json; r=futures_shadow_learning.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Shadow learning selftest selhal." }
+
+& $Python -c "import futures_setup_engine, json; r=futures_setup_engine.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+if ($LASTEXITCODE -ne 0) { throw "Setup V2 selftest selhal." }
 
 & $Python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Autopilot selftest selhal." }
@@ -115,14 +118,17 @@ Write-Host " - siroky PF trh: top 48 levny prefilter / 28 deep analyza"
 Write-Host " - max spread 20 bps"
 Write-Host " - minimalni modelovany net edge 25 bps"
 Write-Host " - volume ratio minimalne 0.60 pro samostatny signal"
-Write-Host " - INVERSE MODE: stary kvalifikovany LONG se obchoduje jako SHORT a naopak"
-Write-Host " - kvalifikace zustava puvodni; ochrany STOP/TP a risk se NEOTACEJI"
-Write-Host " - persistent trend: r5/r15/r30/r60 tvori BASE signal"
+Write-Host " - Setup V2: zadny permanentni INVERSE; LIVE smer = potvrzeny smer setupu"
+Write-Host " - 3min breakout je pouze SHADOW PROBE, bez realne objednavky"
+Write-Host " - LIVE vstup az po potvrzenem 15min range breakoutu"
+Write-Host " - breakout buffer 0.05 %, minimalni pohyb od anchoru 0.35 %"
+Write-Host " - po uzavreni prvniho obchodu je povolen max 1 potvrzeny reversal pres opacnou hranu ulozeneho range"
+Write-Host " - max 2 skutecne vstupy za session: FIRST + REVERSAL"
 Write-Host " - breakout s objemem nebo neprestreleny trend-continuation vstup"
 Write-Host " - volatility-managed size cca 2-5 USD podle ATR"
 Write-Host " - market breadth + recent taker-flow potvrzeni"
-Write-Host " - tempo novych ruznych symbolu dle quality: BASE 90s / STRONG 45s / ELITE 20s"
-Write-Host " - 5 min cooldown stejneho symbolu po vstupu/vystupu"
+Write-Host " - jeden aktivni setup; zadne sekani trhu mnoha nezavislymi vstupy"
+Write-Host " - puvodni quality/microstructure filtry zustavaji jako potvrzeni setupu"
 Write-Host " - TWO_SIDED trh dovoluje LONG i SHORT bez vynuceneho parovani"
 Write-Host " - jednoduche korelacni pary pouze SHADOW; robustni RV oddelene"
 Write-Host " - cil/max cca 5 USD na pozici, max 4 pozice"
@@ -130,7 +136,7 @@ Write-Host " - STOP cca 45 bps"
 Write-Host " - trailing od +45 bps, minimum lock +30 bps"
 Write-Host " - ratchet gap 18 -> 14 -> 10 -> 8 -> 6 bps"
 Write-Host " - backup TP +300 bps"
-Write-Host " - shadow-learning porovnava BASE smer proti INVERSE smeru na 1/3/5/10 min"
+Write-Host " - shadow-learning dal meri neprovedene kandidaty na 1/3/5/10 min"
 Write-Host " - 2 net ztraty po sobe = 10 min pauza; 3 = stop novych vstupu"
 Write-Host " - soft session brzda pri cca 1.5 % poklesu equity"
 Write-Host " - po skutecne odeslanem abortu se dalsi vstupy ZASTAVI"
