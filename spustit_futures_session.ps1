@@ -33,9 +33,12 @@ try {
     Write-Host "60 min | max 10 novych vstupu | max 4 soucasne pozice." -ForegroundColor Yellow
     Write-Host "Cil/max 5 USD/obchod | max 4 pozice | portfolio max 20 USD / 95 % equity." -ForegroundColor Yellow
     Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
-    Write-Host "Siroky PF trh -> top 48 prefilter / 28 deep | trend/breakout | anti-chase | volatility sizing." -ForegroundColor Yellow
+    Write-Host "INVERSE MODE: puvodni kvalifikovany LONG -> SHORT, SHORT -> LONG." -ForegroundColor Magenta
+    Write-Host "Siroky PF trh -> top 48 prefilter / 28 deep | BASE trend/breakout | anti-chase | volatility sizing." -ForegroundColor Yellow
     Write-Host "Market breadth + recent taker flow | adaptive tempo BASE 90s / STRONG 45s / ELITE 20s." -ForegroundColor Yellow
-    Write-Host "Dvousmerny trh dovoluje LONG i SHORT nezavisle; zadny vynuceny hedge. Korelacni pary SHADOW-only." -ForegroundColor Yellow
+    Write-Host "Kvalifikace/quality zustava puvodni, obraci se pouze smer LIVE exekuce." -ForegroundColor Yellow
+    Write-Host "STOP/TP, trailing, loss brakes a circuit breakery se neobraceji." -ForegroundColor Yellow
+    Write-Host "Shadow-learning meri BASE i INVERSE vysledek 1/3/5/10 min. Korelacni pary SHADOW-only." -ForegroundColor Yellow
     Write-Host "STOP ~45 bps | backup TP 300 bps | trailing ratchet 45+ bps, utahovani az na 6 bps." -ForegroundColor Yellow
     Write-Host ""
 
