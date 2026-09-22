@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-DEFAULT_COST_BPS = 14.0
+DEFAULT_COST_BPS = 20.0
 
 
 def norm(s: str) -> str:
