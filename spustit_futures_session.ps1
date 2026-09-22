@@ -33,8 +33,9 @@ try {
     Write-Host "60 min | max 10 novych vstupu | max 4 soucasne pozice." -ForegroundColor Yellow
     Write-Host "Cil/max 5 USD/obchod | max 4 pozice | portfolio max 20 USD / 95 % equity." -ForegroundColor Yellow
     Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
-    Write-Host "TOP-20 + persistent trend/breakout + anti-chase + volatility sizing." -ForegroundColor Yellow
-    Write-Host "Jednoduche korelacni pary jsou SHADOW-only; robustni RV zustava oddeleny research/live gate." -ForegroundColor Yellow
+    Write-Host "Siroky PF trh -> top 48 prefilter / 28 deep | trend/breakout | anti-chase | volatility sizing." -ForegroundColor Yellow
+    Write-Host "Market breadth + recent taker flow | adaptive tempo BASE 90s / STRONG 45s / ELITE 20s." -ForegroundColor Yellow
+    Write-Host "Dvousmerny trh dovoluje LONG i SHORT nezavisle; zadny vynuceny hedge. Korelacni pary SHADOW-only." -ForegroundColor Yellow
     Write-Host "STOP ~45 bps | backup TP 300 bps | trailing ratchet 45+ bps, utahovani az na 6 bps." -ForegroundColor Yellow
     Write-Host ""
 
