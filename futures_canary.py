@@ -12,6 +12,8 @@ from typing import Any
 import pandas as pd
 import requests
 
+from futures_scale_gate import evidence as scale_evidence, scale_multiplier as evidence_scale_multiplier
+
 from futures_private import (
     client_from_env,
     contract_size,
@@ -59,7 +61,7 @@ LIVE_MIN_QUALITY_SCORE = 68.0
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
-MAX_NOTIONAL_USD = 5.0
+MAX_NOTIONAL_USD = 10.0
 MAX_NOTIONAL_PCT_EQUITY = 35.0
 MAX_OPEN_POSITIONS = 4
 MAX_PORTFOLIO_NOTIONAL_USD = 20.0
@@ -621,14 +623,30 @@ def _position_size(client: Any, symbol: str) -> float:
     return float(position_map(client.open_positions()).get(symbol.upper(), 0.0))
 
 
-def _target_notional_for_signal(signal: dict[str, Any], minimum_notional: float) -> float:
-    """Volatility-managed sizing: keep risk smaller when current ATR is elevated."""
+def _target_notional_for_signal(
+    signal: dict[str, Any],
+    minimum_notional: float,
+    quality: dict[str, Any] | None = None,
+) -> float:
+    """Scale only proven edge; volatility and signal quality can only reduce base risk."""
     try:
         atr_bps = max(float(signal.get("atr_bps") or 0.0), 1e-9)
     except Exception:
         atr_bps = VOL_TARGET_ATR_BPS
-    scale = min(1.0, max(0.40, VOL_TARGET_ATR_BPS / atr_bps))
-    target = TARGET_NOTIONAL_USD * scale
+    vol_scale = min(1.0, max(0.40, VOL_TARGET_ATR_BPS / atr_bps))
+
+    q = quality or {}
+    qscore = float(q.get("quality_score") or 0.0)
+    qtier = str(q.get("quality_tier") or "BASE").upper()
+    if qtier == "ELITE" and qscore >= 80.0:
+        quality_scale = 1.0
+    elif qtier == "STRONG" and qscore >= LIVE_MIN_QUALITY_SCORE:
+        quality_scale = 0.85
+    else:
+        quality_scale = 0.70
+
+    evidence_scale = evidence_scale_multiplier()
+    target = TARGET_NOTIONAL_USD * vol_scale * quality_scale * evidence_scale
     target = max(MIN_TARGET_NOTIONAL_USD, target, float(minimum_notional))
     return min(MAX_NOTIONAL_USD, target)
 
@@ -713,7 +731,7 @@ def private_plan() -> dict[str, Any]:
         csize = contract_size(symbol)
         minimum = min_lot(symbol)
         minimum_notional = minimum * px * csize
-        desired_notional = _target_notional_for_signal(p, minimum_notional)
+        desired_notional = _target_notional_for_signal(p, minimum_notional, quality)
         raw_size = desired_notional / (px * csize)
         size = round_size_down(symbol, raw_size)
         if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
@@ -772,6 +790,8 @@ def private_plan() -> dict[str, Any]:
             "estimated_notional_usd": size * px * csize,
             "target_notional_usd": desired_notional,
             "volatility_sizing_scale": round(desired_notional / TARGET_NOTIONAL_USD, 4),
+            "evidence_scale": evidence_scale_multiplier(),
+            "scale_evidence": scale_evidence(),
             "equity_usd": equity,
             "notional_cap_usd": notional_cap,
             "stop_price": stop_price,
