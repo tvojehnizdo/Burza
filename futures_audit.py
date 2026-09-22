@@ -11,6 +11,7 @@ from typing import Any
 import requests
 
 from futures_private import client_from_env, readiness
+from futures_scale_gate import evidence as setup_v3_scale_evidence
 
 REPORT_DIR = Path("reports")
 AUTOPILOT_LOG = Path("data/futures_autopilot_events.jsonl")
@@ -551,6 +552,14 @@ def _md(report: dict[str, Any]) -> str:
             f"pnl_bps={row.get('pnl_bps_before_close')}"
         )
 
+    scale = report.get("setup_v3_scale_evidence") or {}
+    lines += ["", "## Setup V3 scale evidence", ""]
+    lines.append(
+        f"- closed={scale.get('closed_setup_v3_trades')} | tier={scale.get('scale_tier')} | "
+        f"multiplier={scale.get('scale_multiplier')} | PF={scale.get('profit_factor')} | "
+        f"mean_net_bps={scale.get('mean_net_bps')} | net_bps={scale.get('net_bps')}"
+    )
+
     lines += ["", "## Recommendations", ""]
     for r in report["recommendations"]:
         lines.append(f"- {r}")
@@ -617,6 +626,7 @@ def main() -> None:
         "exchange_event_diagnostics": exchange_diag,
         "local_exit_attempts": exit_rows,
         "summary": summary,
+        "setup_v3_scale_evidence": setup_v3_scale_evidence(),
         "performance_by": {
             "quality_tier": _group_performance(trades, "quality_tier"),
             "regime": _group_performance(trades, "regime"),
