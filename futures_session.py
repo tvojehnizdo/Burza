@@ -38,6 +38,9 @@ from futures_private import save_policy
 SESSION_DURATION_SEC = 60 * 60
 SESSION_MAX_ENTRIES = 10
 REENTRY_COOLDOWN_SEC = 300
+GLOBAL_ENTRY_BASE_SEC = 90
+GLOBAL_ENTRY_STRONG_SEC = 45
+GLOBAL_ENTRY_ELITE_SEC = 20
 PAIR_LIVE_ENABLED = False
 
 
@@ -72,6 +75,23 @@ def _cooldown_active(state: dict[str, Any], symbol: str, now_ms: int) -> bool:
 def _set_symbol_cooldown(state: dict[str, Any], symbol: str, now_ms: int) -> None:
     cooldowns = state.setdefault("symbol_cooldowns", {})
     cooldowns[str(symbol).upper()] = int(now_ms + REENTRY_COOLDOWN_SEC * 1000)
+
+
+def _global_entry_wait_sec(candidate: dict[str, Any]) -> int:
+    tier = str(candidate.get("quality_tier") or "BASE").upper()
+    if tier == "ELITE":
+        return GLOBAL_ENTRY_ELITE_SEC
+    if tier == "STRONG":
+        return GLOBAL_ENTRY_STRONG_SEC
+    return GLOBAL_ENTRY_BASE_SEC
+
+
+def _global_entry_ready(state: dict[str, Any], candidate: dict[str, Any], now_ms: int) -> tuple[bool, int]:
+    wait_sec = _global_entry_wait_sec(candidate)
+    last_ms = int(state.get("last_any_entry_ts_ms") or 0)
+    if last_ms <= 0:
+        return True, wait_sec
+    return now_ms - last_ms >= wait_sec * 1000, wait_sec
 
 
 def _apply_exit_cooldowns(state: dict[str, Any], exits: list[dict[str, Any]], now_ms: int) -> None:
@@ -246,12 +266,24 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
             "pair_reason": pair_result.get("reason"),
         }
 
+    global_ready, global_wait_sec = _global_entry_ready(state, selected, now_ms)
+    if not global_ready:
+        return {
+            "ok": True,
+            "reason": "GLOBAL_ENTRY_PACING",
+            "quality_tier": selected.get("quality_tier"),
+            "quality_score": selected.get("quality_score"),
+            "required_wait_sec": global_wait_sec,
+            "pair_reason": pair_result.get("reason"),
+        }
+
     result = execute_candidate(dict(selected))
     if result.get("ok") and result.get("reason") == "FUTURES_CANARY_LIVE_WITH_PROTECTION":
         state["session_entry_count"] = int(state.get("session_entry_count") or 0) + 1
         state["stats"]["auto_entries"] = int(state.get("stats", {}).get("auto_entries", 0)) + 1
         symbol = str((result.get("candidate") or {}).get("symbol") or "").upper()
         _set_symbol_cooldown(state, symbol, now_ms)
+        state["last_any_entry_ts_ms"] = now_ms
         _log({
             "event": "BOUNDED_SESSION_AUTO_ENTRY",
             "symbol": symbol,
@@ -259,6 +291,9 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
             "result": result,
             "pair_reason": pair_result.get("reason"),
             "reentry_cooldown_sec": REENTRY_COOLDOWN_SEC,
+            "global_entry_wait_sec": _global_entry_wait_sec(selected),
+            "quality_tier": selected.get("quality_tier"),
+            "quality_score": selected.get("quality_score"),
         })
         return {
             "ok": True,
@@ -294,6 +329,7 @@ def run_session() -> None:
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
     state["session_entry_count"] = 0
     state["symbol_cooldowns"] = {}
+    state["last_any_entry_ts_ms"] = 0
     state.pop("entry_halt_reason", None)
     state["session_capital_usd"] = min(SESSION_CAPITAL_USD, float(initial["equity_usd"]))
     _save_state(state)
@@ -409,6 +445,11 @@ def status() -> dict[str, Any]:
         "session_capital_usd": SESSION_CAPITAL_USD,
         "max_session_drawdown_pct": MAX_SESSION_DRAWDOWN_PCT,
         "reentry_cooldown_sec": REENTRY_COOLDOWN_SEC,
+        "global_entry_pacing_sec": {
+            "BASE": GLOBAL_ENTRY_BASE_SEC,
+            "STRONG": GLOBAL_ENTRY_STRONG_SEC,
+            "ELITE": GLOBAL_ENTRY_ELITE_SEC,
+        },
         "simple_pair_live_enabled": PAIR_LIVE_ENABLED,
         "state": state,
     }
@@ -422,6 +463,9 @@ def selftest() -> dict[str, Any]:
         "capital_22": SESSION_CAPITAL_USD == 22.0,
         "drawdown_50": MAX_SESSION_DRAWDOWN_PCT == 50.0,
         "max_open_4": MAX_OPEN_POSITIONS == 4,
+        "adaptive_pacing": (
+            GLOBAL_ENTRY_ELITE_SEC < GLOBAL_ENTRY_STRONG_SEC < GLOBAL_ENTRY_BASE_SEC
+        ),
         "window_open": _entry_allowed(
             now_ms,
             {"session_deadline_ts_ms": now_ms + 60_000, "session_entry_count": 0},
