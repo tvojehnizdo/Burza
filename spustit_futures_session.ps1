@@ -31,15 +31,13 @@ try {
     Write-Host "FUTURES BOUNDED LIVE SESSION" -ForegroundColor Cyan
     Write-Host "Spusteni tohoto skriptu = schvaleni cele relace." -ForegroundColor Yellow
     Write-Host "60 min | max 2 skutecne vstupy v jednom setupu." -ForegroundColor Yellow
-    Write-Host "Cil/max 5 USD/obchod | max 4 pozice | portfolio max 20 USD / 95 % equity." -ForegroundColor Yellow
-    Write-Host "Kill-switch: max 50 % vycleneneho kapitalu (max 11 USD pri 22 USD)." -ForegroundColor Yellow
-    Write-Host "SETUP V2: bez permanentniho INVERSE." -ForegroundColor Magenta
-    Write-Host "Siroky PF trh -> top 48 prefilter / 28 deep | BASE trend/breakout | anti-chase | volatility sizing." -ForegroundColor Yellow
-    Write-Host "Market breadth + recent taker flow | adaptive tempo BASE 90s / STRONG 45s / ELITE 20s." -ForegroundColor Yellow
-    Write-Host "3m probe je SHADOW; LIVE az po 15m potvrzeni." -ForegroundColor Yellow
-    Write-Host "Po uzavreni prvniho obchodu je povolen max 1 potvrzeny reversal." -ForegroundColor Yellow
-    Write-Host "Risk ochrany zustavaji, korelacni pary jsou SHADOW-only." -ForegroundColor Yellow
-    Write-Host "STOP ~45 bps | backup TP 300 bps | trailing ratchet 45+ bps, utahovani az na 6 bps." -ForegroundColor Yellow
+    Write-Host "Base target 5 USD | scale nad 5 USD jen po auditovanem evidence gate | cap 10 USD / 35 % Futures equity." -ForegroundColor Yellow
+    Write-Host "Soft brzda 1.5 % equity | hard kill-switch 5 % session kapitalu." -ForegroundColor Yellow
+    Write-Host "SETUP V4 MICRO/MAKER: bez permanentniho INVERSE." -ForegroundColor Magenta
+    Write-Host "Siroky PF trh -> 48 prefilter / 28 deep -> quality -> fresh flow -> orderbook -> BTC/ETH leaders." -ForegroundColor Yellow
+    Write-Host "3m probe SHADOW | LIVE az po 15m potvrzeni | max 1 potvrzeny reversal." -ForegroundColor Yellow
+    Write-Host "Maker-first post-only na touch; kratke cekani, overeny cancel, az potom market fallback." -ForegroundColor Yellow
+    Write-Host "STOP ~45 bps | failed-breakout exit | trailing winner muze bezet az 30 min | backup TP 300 bps." -ForegroundColor Yellow
     Write-Host ""
 
     & $Python "futures_session.py" --run --confirm RUN-BOUNDED-LIVE-SESSION
