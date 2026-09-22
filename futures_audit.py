@@ -170,6 +170,9 @@ def _signal_events(canary: list[dict[str, Any]], since_ms: int) -> list[dict[str
             "breakout": bool(source.get("breakout")),
             "breadth_alignment": int(source.get("breadth_alignment") or 0),
             "micro_aligned_flow": _num(micro.get("aligned_flow"), 0.0),
+            "base_signal_side": str(cand.get("base_signal_side") or source.get("base_side") or "").upper(),
+            "execution_signal_side": str(cand.get("execution_signal_side") or source.get("execution_side") or "").upper(),
+            "direction_inverted": bool(cand.get("direction_inverted") or source.get("direction_inverted")),
         })
     return out
 
@@ -262,6 +265,9 @@ def _trade_roundtrips(events: list[dict[str, Any]], signals: list[dict[str, Any]
                 cur["breakout"] = sig.get("breakout")
                 cur["breadth_alignment"] = sig.get("breadth_alignment")
                 cur["micro_aligned_flow"] = sig.get("micro_aligned_flow")
+                cur["base_signal_side"] = sig.get("base_signal_side")
+                cur["execution_signal_side"] = sig.get("execution_signal_side")
+                cur["direction_inverted"] = sig.get("direction_inverted")
                 if sig["signal_mid"] > 0 and cur["entry_price"] > 0:
                     direction = 1.0 if cur["side"] == "long" else -1.0
                     cur["entry_slippage_bps"] = direction * (
@@ -617,6 +623,9 @@ def main() -> None:
             "market_regime": _group_performance(trades, "market_regime"),
             "side": _group_performance(trades, "side"),
             "breakout": _group_performance(trades, "breakout"),
+            "direction_inverted": _group_performance(trades, "direction_inverted"),
+            "base_signal_side": _group_performance(trades, "base_signal_side"),
+            "execution_signal_side": _group_performance(trades, "execution_signal_side"),
         },
         "exit_reasons": dict(exit_counts),
         "trades": trades,
