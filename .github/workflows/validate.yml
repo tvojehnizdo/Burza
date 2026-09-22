@@ -26,6 +26,7 @@ jobs:
       - run: python -c "import relative_value, json; r=relative_value.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import fx_breakout, json; r=fx_breakout.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import rv_live, json; r=rv_live.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+      - run: python -c "import futures_canary, json; r=futures_canary.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_session, json; r=futures_session.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
       - run: python -c "import futures_pairs, json; r=futures_pairs.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
