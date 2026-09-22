@@ -731,7 +731,10 @@ def private_plan() -> dict[str, Any]:
         csize = contract_size(symbol)
         minimum = min_lot(symbol)
         minimum_notional = minimum * px * csize
-        desired_notional = _target_notional_for_signal(p, minimum_notional, quality)
+        desired_notional = min(
+            notional_cap,
+            _target_notional_for_signal(p, minimum_notional, quality),
+        )
         raw_size = desired_notional / (px * csize)
         size = round_size_down(symbol, raw_size)
         if size < minimum and minimum_notional <= MAX_NOTIONAL_USD + 1e-9:
