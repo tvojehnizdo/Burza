@@ -1021,8 +1021,8 @@ def rescue_existing_position() -> dict[str, Any]:
         except Exception:
             pass
 
-        stop_frac = 0.005
-        take_frac = 0.010
+        stop_frac = HARD_STOP_BPS / 10000.0
+        take_frac = BACKUP_TAKE_PROFIT_BPS / 10000.0
         if signed_size > 0:
             stop_price = round_price_to_tick(symbol, px * (1.0 - stop_frac), mode="down")
             take_price = round_price_to_tick(symbol, px * (1.0 + take_frac), mode="up")
