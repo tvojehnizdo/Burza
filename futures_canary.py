@@ -13,6 +13,7 @@ import pandas as pd
 import requests
 
 from futures_scale_gate import evidence as scale_evidence, scale_multiplier as evidence_scale_multiplier
+from futures_microstructure_v4 import leader_alignment, orderbook_profile
 
 from futures_private import (
     client_from_env,
@@ -20,6 +21,7 @@ from futures_private import (
     instrument_specs,
     load_policy,
     min_lot,
+    open_order_rows,
     order_preflight,
     place_order,
     position_map,
@@ -58,6 +60,12 @@ MICRO_OPPOSING_FLOW_VETO = -0.18
 MICRO_ALIGNED_FLOW_CONFIRM = 0.05
 MICRO_FLOW_MAX_AGE_SEC = 120
 LIVE_MIN_QUALITY_SCORE = 68.0
+V4_ORDERBOOK_BONUS = 4.0
+V4_LEADER_BONUS = 3.0
+MAKER_FIRST_ENABLED = True
+MAKER_WAIT_SEC = 1.50
+MAKER_POLL_SEC = 0.15
+MAKER_CANCEL_VERIFY_SEC = 1.20
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
@@ -716,6 +724,45 @@ def private_plan() -> dict[str, Any]:
         # silently changing both selection and direction at once.
         micro = _recent_trade_flow(symbol)
         quality = _quality_profile(p, micro)
+        leaders = leader_alignment(scan.get("all", []), symbol, execution_signal)
+        if int(leaders.get("alignment") or 0) < 0:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "BTC_ETH_LEADERS_OPPOSE_SIGNAL",
+                "signal": p,
+                "quality": quality,
+                "leaders": leaders,
+            })
+            continue
+
+        book = orderbook_profile(symbol, execution_signal)
+        if not book.get("available"):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "ORDERBOOK_UNAVAILABLE",
+                "signal": p,
+                "quality": quality,
+                "leaders": leaders,
+                "orderbook": book,
+            })
+            continue
+        if book.get("veto"):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "ORDERBOOK_PRESSURE_OPPOSES_SIGNAL",
+                "signal": p,
+                "quality": quality,
+                "leaders": leaders,
+                "orderbook": book,
+            })
+            continue
+
+        v4_score = float(quality.get("quality_score") or 0.0)
+        if book.get("confirmed"):
+            v4_score += V4_ORDERBOOK_BONUS
+        if int(leaders.get("alignment") or 0) > 0:
+            v4_score += V4_LEADER_BONUS
+
         if not quality.get("microstructure_ok"):
             rejected.append({
                 "symbol": symbol,
@@ -814,13 +861,16 @@ def private_plan() -> dict[str, Any]:
             },
             "quality_score": quality["quality_score"],
             "quality_tier": quality["quality_tier"],
+            "v4_score": round(v4_score, 4),
             "microstructure": quality,
+            "orderbook": book,
+            "leader_context": leaders,
             "preflight": pre,
         })
 
     executable.sort(
         key=lambda x: (
-            float(x.get("quality_score") or 0.0),
+            float(x.get("v4_score") or x.get("quality_score") or 0.0),
             float(x["taker_net_edge_bps"]),
             float(x["confidence"]),
         ),
@@ -1326,6 +1376,8 @@ def selftest() -> dict[str, Any]:
         "scan_cache_positive": PUBLIC_SCAN_CACHE_SEC > 0,
         "flow_window_positive": MICRO_FLOW_MAX_AGE_SEC > 0,
         "live_quality_gate_positive": LIVE_MIN_QUALITY_SCORE >= 50.0,
+        "maker_wait_positive": MAKER_WAIT_SEC > 0 and MAKER_POLL_SEC > 0,
+        "v4_bonuses_nonnegative": V4_ORDERBOOK_BONUS >= 0 and V4_LEADER_BONUS >= 0,
         "inverse_long_to_short": execution_signal_side("LONG") == ("SHORT" if INVERT_DIRECTION else "LONG"),
         "inverse_short_to_long": execution_signal_side("SHORT") == ("LONG" if INVERT_DIRECTION else "SHORT"),
     }
