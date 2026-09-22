@@ -51,12 +51,18 @@ git pull --ff-only
 if ($LASTEXITCODE -ne 0) { throw "git pull selhal." }
 
 Write-Host "[2/6] Kompilace..." -ForegroundColor Cyan
-& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py
+& $Python -m py_compile futures_private.py futures_canary.py futures_autopilot.py futures_pairs.py futures_session.py futures_audit.py futures_shadow_learning.py
 if ($LASTEXITCODE -ne 0) { throw "Python kompilace selhala." }
 
 Write-Host "[3/6] Selftesty..." -ForegroundColor Cyan
 & $Python -c "import futures_private, json; r=futures_private.precision_selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Precision selftest selhal." }
+
+& $Python -c "import futures_canary, json; r=futures_canary.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+if ($LASTEXITCODE -ne 0) { throw "Canary selftest selhal." }
+
+& $Python -c "import futures_shadow_learning, json; r=futures_shadow_learning.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
+if ($LASTEXITCODE -ne 0) { throw "Shadow learning selftest selhal." }
 
 & $Python -c "import futures_autopilot, json; r=futures_autopilot.selftest(); print(json.dumps(r,indent=2)); assert r['ok']"
 if ($LASTEXITCODE -ne 0) { throw "Autopilot selftest selhal." }
@@ -86,7 +92,7 @@ try {
         if ($stop -le 0 -or $take -le 0 -or $mid -le 0) {
             throw "Neplatna ochranna cena v planu: mid=$mid stop=$stop take=$take"
         }
-        $msg = "Plan OK: {0} {1} | mid={2} stop={3} TP={4}" -f $plan.candidate.symbol,$plan.candidate.side,$mid,$stop,$take
+        $msg = "Plan OK: {0} EXEC={1} BASE={2} INVERT={3} | mid={4} stop={5} TP={6}" -f $plan.candidate.symbol,$plan.candidate.execution_signal_side,$plan.candidate.base_signal_side,$plan.candidate.direction_inverted,$mid,$stop,$take
         Write-Host $msg -ForegroundColor Green
     } else {
         Write-Host ("Plan je technicky OK, ale ted neni vhodny signal: {0}" -f $plan.reason) -ForegroundColor Yellow
@@ -109,7 +115,9 @@ Write-Host " - siroky PF trh: top 48 levny prefilter / 28 deep analyza"
 Write-Host " - max spread 20 bps"
 Write-Host " - minimalni modelovany net edge 25 bps"
 Write-Host " - volume ratio minimalne 0.60 pro samostatny signal"
-Write-Host " - persistent trend: r5/r15/r30/r60 ve stejnem smeru"
+Write-Host " - INVERSE MODE: stary kvalifikovany LONG se obchoduje jako SHORT a naopak"
+Write-Host " - kvalifikace zustava puvodni; ochrany STOP/TP a risk se NEOTACEJI"
+Write-Host " - persistent trend: r5/r15/r30/r60 tvori BASE signal"
 Write-Host " - breakout s objemem nebo neprestreleny trend-continuation vstup"
 Write-Host " - volatility-managed size cca 2-5 USD podle ATR"
 Write-Host " - market breadth + recent taker-flow potvrzeni"
@@ -122,6 +130,9 @@ Write-Host " - STOP cca 45 bps"
 Write-Host " - trailing od +45 bps, minimum lock +30 bps"
 Write-Host " - ratchet gap 18 -> 14 -> 10 -> 8 -> 6 bps"
 Write-Host " - backup TP +300 bps"
+Write-Host " - shadow-learning porovnava BASE smer proti INVERSE smeru na 1/3/5/10 min"
+Write-Host " - 2 net ztraty po sobe = 10 min pauza; 3 = stop novych vstupu"
+Write-Host " - soft session brzda pri cca 1.5 % poklesu equity"
 Write-Host " - po skutecne odeslanem abortu se dalsi vstupy ZASTAVI"
 Write-Host ""
 Write-Host "Pozor: zadne nastaveni nezarucuje zisk." -ForegroundColor Yellow
