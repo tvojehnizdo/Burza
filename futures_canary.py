@@ -26,9 +26,11 @@ from futures_private import (
     save_policy,
 )
 
-MAX_UNIVERSE = 20
-UNIVERSE_PREFILTER = 32
+MAX_UNIVERSE = 28
+UNIVERSE_PREFILTER = 48
 MAX_UNIVERSE_SPREAD_BPS = 20.0
+PUBLIC_SCAN_CACHE_SEC = 20
+BREADTH_STRONG_THRESHOLD = 0.35
 EVENT_LOG = Path("data/futures_canary_events.jsonl")
 
 # Tier-1 Futures taker fee 5 bps/side + conservative 2 bps slippage
@@ -45,6 +47,10 @@ BREAKOUT_VOLUME_RATIO = 1.00
 MAX_EMA6_DISTANCE_ATR = 1.25
 VOL_TARGET_ATR_BPS = 20.0
 MIN_TARGET_NOTIONAL_USD = 2.0
+MICRO_MIN_TRADES = 8
+MICRO_VETO_TRADES = 12
+MICRO_OPPOSING_FLOW_VETO = -0.18
+MICRO_ALIGNED_FLOW_CONFIRM = 0.05
 BACKUP_TAKE_PROFIT_BPS = 300.0
 HARD_STOP_BPS = 45.0
 TARGET_NOTIONAL_USD = 5.0
@@ -54,6 +60,10 @@ MAX_OPEN_POSITIONS = 4
 MAX_PORTFOLIO_NOTIONAL_USD = 20.0
 MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY = 95.0
 CHARTS = "https://futures.kraken.com/api/charts/v1"
+FUTURES_HISTORY = "https://futures.kraken.com/derivatives/api/v3/history"
+
+_SCAN_CACHE_TS = 0.0
+_SCAN_CACHE: dict[str, Any] | None = None
 
 
 def _candles(symbol: str, count: int = 120) -> pd.DataFrame:
@@ -268,6 +278,150 @@ def _dynamic_universe(max_symbols: int = UNIVERSE_PREFILTER) -> list[str]:
     return [symbol for _, symbol in ranked[:max_symbols]]
 
 
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(high, max(low, float(value)))
+
+
+def _market_breadth(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    trend_rows = [
+        x for x in rows
+        if str(x.get("side") or "") in {"LONG", "SHORT"} and bool(x.get("trend_persistent"))
+    ]
+    longs = sum(1 for x in trend_rows if x.get("side") == "LONG")
+    shorts = sum(1 for x in trend_rows if x.get("side") == "SHORT")
+    total = longs + shorts
+    breadth = (longs - shorts) / total if total else 0.0
+    if breadth >= BREADTH_STRONG_THRESHOLD:
+        regime = "BULL_BREADTH"
+    elif breadth <= -BREADTH_STRONG_THRESHOLD:
+        regime = "BEAR_BREADTH"
+    else:
+        regime = "TWO_SIDED"
+    return {
+        "long_trend_count": longs,
+        "short_trend_count": shorts,
+        "trend_count": total,
+        "breadth_score": round(breadth, 4),
+        "regime": regime,
+    }
+
+
+def _breadth_alignment(side: str, breadth: dict[str, Any]) -> int:
+    regime = str(breadth.get("regime") or "TWO_SIDED")
+    side = str(side).upper()
+    if regime == "BULL_BREADTH":
+        return 1 if side == "LONG" else -1
+    if regime == "BEAR_BREADTH":
+        return 1 if side == "SHORT" else -1
+    return 0
+
+
+def _recent_trade_flow(symbol: str) -> dict[str, Any]:
+    """Public taker-flow proxy from Kraken Futures recent trade history."""
+    try:
+        r = requests.get(FUTURES_HISTORY, params={"symbol": symbol}, timeout=10)
+        r.raise_for_status()
+        rows = r.json().get("history") or []
+    except Exception as exc:
+        return {
+            "available": False,
+            "symbol": symbol,
+            "trade_count": 0,
+            "flow_imbalance": 0.0,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    buy = 0.0
+    sell = 0.0
+    count = 0
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            continue
+        typ = str(row.get("type") or "fill").lower()
+        if typ in {"block", "assignment"}:
+            continue
+        side = str(row.get("side") or "").lower()
+        if side not in {"buy", "sell"}:
+            continue
+        try:
+            px = float(row.get("price") or 0.0)
+            size = float(row.get("size") or 0.0)
+        except Exception:
+            continue
+        weight = abs(px * size)
+        if weight <= 0:
+            continue
+        if side == "buy":
+            buy += weight
+        else:
+            sell += weight
+        count += 1
+
+    total = buy + sell
+    flow = (buy - sell) / total if total > 0 else 0.0
+    return {
+        "available": bool(count),
+        "symbol": symbol,
+        "trade_count": count,
+        "buy_notional_proxy": round(buy, 6),
+        "sell_notional_proxy": round(sell, 6),
+        "flow_imbalance": round(flow, 4),
+    }
+
+
+def _quality_profile(signal: dict[str, Any], micro: dict[str, Any]) -> dict[str, Any]:
+    side = str(signal.get("side") or "").upper()
+    direction = 1.0 if side == "LONG" else -1.0
+    flow = float(micro.get("flow_imbalance") or 0.0)
+    aligned_flow = direction * flow
+    trade_count = int(micro.get("trade_count") or 0)
+
+    micro_veto = bool(
+        trade_count >= MICRO_VETO_TRADES
+        and aligned_flow <= MICRO_OPPOSING_FLOW_VETO
+    )
+    micro_confirmed = bool(
+        trade_count >= MICRO_MIN_TRADES
+        and aligned_flow >= MICRO_ALIGNED_FLOW_CONFIRM
+    )
+
+    confidence = _clamp(float(signal.get("confidence") or 0.0), 0.0, 1.0)
+    edge = _clamp((float(signal.get("taker_net_edge_bps") or 0.0) - MIN_TAKER_NET_EDGE_BPS) / 75.0, 0.0, 1.0)
+    volume = _clamp((float(signal.get("volume_ratio") or 0.0) - MIN_VOLUME_RATIO) / 1.40, 0.0, 1.0)
+    structure = 1.0 if bool(signal.get("breakout")) else 0.72 if bool(signal.get("continuation_ok")) else 0.0
+    flow_score = _clamp((aligned_flow + 0.50) / 1.00, 0.0, 1.0) if trade_count >= MICRO_MIN_TRADES else 0.50
+    breadth_alignment = int(signal.get("breadth_alignment") or 0)
+    breadth_score = 0.65 if breadth_alignment > 0 else 0.35 if breadth_alignment < 0 else 0.50
+
+    quality = 100.0 * (
+        0.30 * confidence
+        + 0.25 * edge
+        + 0.15 * volume
+        + 0.15 * structure
+        + 0.10 * flow_score
+        + 0.05 * breadth_score
+    )
+    if micro_veto:
+        quality = min(quality, 49.0)
+
+    if quality >= 80.0 and micro_confirmed:
+        tier = "ELITE"
+    elif quality >= 68.0 and not micro_veto:
+        tier = "STRONG"
+    else:
+        tier = "BASE"
+
+    return {
+        "quality_score": round(quality, 2),
+        "quality_tier": tier,
+        "microstructure_ok": not micro_veto,
+        "microstructure_confirmed": micro_confirmed,
+        "aligned_flow": round(aligned_flow, 4),
+        "micro": micro,
+    }
+
+
 def _log(event: dict[str, Any]) -> None:
     EVENT_LOG.parent.mkdir(parents=True, exist_ok=True)
     row = {"ts_ms": int(time.time() * 1000), **event}
@@ -275,7 +429,19 @@ def _log(event: dict[str, Any]) -> None:
         fh.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
-def public_scan() -> dict[str, Any]:
+def public_scan(force_refresh: bool = False) -> dict[str, Any]:
+    global _SCAN_CACHE_TS, _SCAN_CACHE
+    now = time.time()
+    if (
+        not force_refresh
+        and _SCAN_CACHE is not None
+        and now - _SCAN_CACHE_TS < PUBLIC_SCAN_CACHE_SEC
+    ):
+        cached = dict(_SCAN_CACHE)
+        cached["cache_age_sec"] = round(now - _SCAN_CACHE_TS, 3)
+        cached["from_cache"] = True
+        return cached
+
     prefilter_symbols = _dynamic_universe(UNIVERSE_PREFILTER)
     scanned: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(prefilter_symbols)))) as pool:
@@ -288,6 +454,8 @@ def public_scan() -> dict[str, Any]:
                 scanned.append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
 
     valid = [x for x in scanned if not x.get("error")]
+    breadth = _market_breadth(valid)
+
     valid.sort(
         key=lambda x: float(x.get("volatility_score") or 0.0),
         reverse=True,
@@ -295,16 +463,26 @@ def public_scan() -> dict[str, Any]:
     rows = valid[:MAX_UNIVERSE]
     symbols = [str(x.get("symbol") or "") for x in rows]
 
+    for row in rows:
+        align = _breadth_alignment(str(row.get("side") or ""), breadth)
+        row["breadth_alignment"] = align
+        row["market_regime"] = breadth["regime"]
+        row["market_breadth_score"] = breadth["breadth_score"]
+        row["ranking_edge_bps"] = round(
+            float(row.get("taker_net_edge_bps") or 0.0) + 8.0 * align,
+            3,
+        )
+
     rows.sort(
         key=lambda x: (
             bool(x.get("canary_signal_ready")),
-            float(x.get("taker_net_edge_bps") or -999.0),
+            float(x.get("ranking_edge_bps") or -999.0),
             float(x.get("confidence") or 0.0),
         ),
         reverse=True,
     )
     ready = [x for x in rows if x.get("canary_signal_ready")]
-    return {
+    result = {
         "ready": bool(ready),
         "reason": "FUTURES_CANARY_SIGNAL_READY" if ready else "NO_POSITIVE_FUTURES_CANARY",
         "candidate": ready[0] if ready else (rows[0] if rows else None),
@@ -313,11 +491,20 @@ def public_scan() -> dict[str, Any]:
         "prefilter_count": len(prefilter_symbols),
         "symbols": symbols,
         "all": rows,
+        "market_breadth": breadth,
         "round_trip_taker_cost_bps": ROUND_TRIP_TAKER_COST_BPS,
         "min_net_edge_bps": MIN_TAKER_NET_EDGE_BPS,
         "actual_order_submitted": False,
-        "note": "Dynamic TOP-20 Kraken PF_*USD universe ranked primarily by normalized candle volatility (ATR/median range/realized vol), with liquidity, spread and min-lot gates.",
+        "from_cache": False,
+        "cache_age_sec": 0.0,
+        "note": (
+            "Broad Kraken PF_*USD discovery, then deep ranking by volatility, "
+            "trend persistence, breakout/anti-chase, breadth and execution gates."
+        ),
     }
+    _SCAN_CACHE = result
+    _SCAN_CACHE_TS = now
+    return dict(result)
 
 
 def _ticker_mid(client: Any, symbol: str) -> float:
@@ -436,6 +623,16 @@ def private_plan() -> dict[str, Any]:
 
     for p in candidates:
         symbol = str(p["symbol"]).upper()
+        micro = _recent_trade_flow(symbol)
+        quality = _quality_profile(p, micro)
+        if not quality.get("microstructure_ok"):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "MICROSTRUCTURE_OPPOSES_SIGNAL",
+                "signal": p,
+                "quality": quality,
+            })
+            continue
         px = _ticker_mid(client, symbol)
         csize = contract_size(symbol)
         minimum = min_lot(symbol)
@@ -508,11 +705,18 @@ def private_plan() -> dict[str, Any]:
             "taker_net_edge_bps": p.get("taker_net_edge_bps"),
             "confidence": p.get("confidence"),
             "source_signal": p,
+            "quality_score": quality["quality_score"],
+            "quality_tier": quality["quality_tier"],
+            "microstructure": quality,
             "preflight": pre,
         })
 
     executable.sort(
-        key=lambda x: (float(x["taker_net_edge_bps"]), float(x["confidence"])),
+        key=lambda x: (
+            float(x.get("quality_score") or 0.0),
+            float(x["taker_net_edge_bps"]),
+            float(x["confidence"]),
+        ),
         reverse=True,
     )
 
