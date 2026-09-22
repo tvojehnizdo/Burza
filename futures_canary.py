@@ -1421,13 +1421,27 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         return result
 
     except Exception as exc:
+        submitted_entry_evidence = bool(entry and entry.get("submitted_live"))
         try:
+            try:
+                pending_entry_order = any(
+                    str(row.get("symbol") or row.get("tradeable") or "").upper() == symbol
+                    and not bool(row.get("reduceOnly", False))
+                    for row in open_order_rows(client.open_orders())
+                )
+                submitted_entry_evidence = submitted_entry_evidence or pending_entry_order
+            except Exception:
+                pass
+
+            visible = _position_size(client, symbol)
+            submitted_entry_evidence = submitted_entry_evidence or abs(visible) >= min_lot(symbol)
+
             try:
                 from futures_private import cancel_symbol_orders
                 cancel_symbol_orders(client, symbol, reduce_only_only=False)
             except Exception:
                 pass
-            visible = _position_size(client, symbol)
+
             if abs(visible) >= min_lot(symbol):
                 close_side = "sell" if visible > 0 else "buy"
                 close_size = round_size_down(symbol, abs(visible))
@@ -1452,7 +1466,7 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             "stop": stop,
             "take_profit": take,
             "compensation": compensation,
-            "actual_order_submitted": bool(entry and entry.get("submitted_live")),
+            "actual_order_submitted": bool(submitted_entry_evidence),
         }
         _log(result)
         return result
