@@ -319,6 +319,8 @@ def _candidate_live_gate(candidate: dict[str, Any]) -> tuple[bool, str]:
     quality = float(candidate.get("quality_score") or 0.0)
     tier = str(candidate.get("quality_tier") or "BASE").upper()
     micro = candidate.get("microstructure") if isinstance(candidate.get("microstructure"), dict) else {}
+    book = candidate.get("orderbook") if isinstance(candidate.get("orderbook"), dict) else {}
+    leaders = candidate.get("leader_context") if isinstance(candidate.get("leader_context"), dict) else {}
     source = candidate.get("source_signal") if isinstance(candidate.get("source_signal"), dict) else {}
     if quality < LIVE_MIN_QUALITY_SCORE:
         return False, "QUALITY_BELOW_LIVE_GATE"
@@ -328,18 +330,36 @@ def _candidate_live_gate(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, "MARKET_BREADTH_OPPOSES_SIGNAL"
     if LIVE_REQUIRE_FRESH_MICRO_CONFIRM and not bool(micro.get("microstructure_confirmed")):
         return False, "FRESH_MICROSTRUCTURE_NOT_CONFIRMED"
+    if not bool(book.get("available")):
+        return False, "ORDERBOOK_NOT_AVAILABLE"
+    if bool(book.get("veto")):
+        return False, "ORDERBOOK_PRESSURE_OPPOSES_SIGNAL"
+    if int(leaders.get("alignment") or 0) < 0:
+        return False, "BTC_ETH_LEADERS_OPPOSE_SIGNAL"
     return True, "LIVE_GATE_OK"
 
 
 def _setup_opportunity_score(candidate: dict[str, Any], signal: dict[str, Any]) -> float:
     source = candidate.get("source_signal") if isinstance(candidate.get("source_signal"), dict) else {}
     micro = candidate.get("microstructure") if isinstance(candidate.get("microstructure"), dict) else {}
-    quality = float(candidate.get("quality_score") or 0.0)
+    book = candidate.get("orderbook") if isinstance(candidate.get("orderbook"), dict) else {}
+    leaders = candidate.get("leader_context") if isinstance(candidate.get("leader_context"), dict) else {}
+    quality = float(candidate.get("v4_score") or candidate.get("quality_score") or 0.0)
     distance = min(max(float(signal.get("breakout_distance_bps") or 0.0), 0.0), 30.0)
     volume = min(max(float(source.get("volume_ratio") or 0.0) - 1.0, 0.0), 2.0)
     flow = max(float(micro.get("aligned_flow") or 0.0), 0.0)
+    book_pressure = max(float(book.get("aligned_imbalance") or 0.0), 0.0)
     breadth = max(int(source.get("breadth_alignment") or 0), 0)
-    return quality + 0.60 * distance + 5.0 * volume + 10.0 * flow + 3.0 * breadth
+    leader = max(int(leaders.get("alignment") or 0), 0)
+    return (
+        quality
+        + 0.60 * distance
+        + 5.0 * volume
+        + 10.0 * flow
+        + 8.0 * book_pressure
+        + 3.0 * breadth
+        + 3.0 * leader
+    )
 
 
 def _best_confirmed_opportunity(
@@ -417,6 +437,8 @@ def _setup_live_success(
     )
     setup["live_quality_score"] = candidate.get("quality_score")
     setup["live_quality_tier"] = candidate.get("quality_tier")
+    setup["live_v4_score"] = candidate.get("v4_score")
+    setup["entry_mode"] = result.get("entry_mode")
     if live_stage == "FIRST_LIVE":
         setup["first_live_opened"] = True
     elif live_stage == "REVERSAL_LIVE":
@@ -846,7 +868,7 @@ def run_session() -> None:
     initial = _portfolio_snapshot(client)
     now_ms = int(time.time() * 1000)
 
-    state["strategy_version"] = "SETUP_V3_PROFIT_SCALE"
+    state["strategy_version"] = "SETUP_V4_MICRO_MAKER"
     state["session_start_equity"] = float(initial["equity_usd"])
     state["session_start_ts_ms"] = now_ms
     state["session_deadline_ts_ms"] = now_ms + SESSION_DURATION_SEC * 1000
