@@ -1152,6 +1152,169 @@ def rescue_existing_position() -> dict[str, Any]:
 
 
 
+def _maker_wait_for_candidate(candidate: dict[str, Any]) -> float:
+    tier = str(candidate.get("quality_tier") or "BASE").upper()
+    source = candidate.get("source_signal") if isinstance(candidate.get("source_signal"), dict) else {}
+    breakout_distance = abs(float(source.get("breakout_distance_bps") or 0.0))
+    if tier == "ELITE" or breakout_distance >= 10.0:
+        return min(MAKER_WAIT_SEC, 0.45)
+    return MAKER_WAIT_SEC
+
+
+def _cli_order_is_open(client: Any, cli_id: str) -> bool:
+    for row in open_order_rows(client.open_orders()):
+        if str(row.get("cliOrdId") or "") == str(cli_id):
+            return True
+    return False
+
+
+def _cancel_entry_and_verify(client: Any, cli_id: str) -> dict[str, Any]:
+    cancel: dict[str, Any] | None = None
+    try:
+        cancel = client.cancel_order(cli_ord_id=cli_id)
+    except Exception as exc:
+        cancel = {"error": f"{type(exc).__name__}: {exc}"}
+
+    deadline = time.time() + MAKER_CANCEL_VERIFY_SEC
+    while time.time() < deadline:
+        if not _cli_order_is_open(client, cli_id):
+            return {"ok": True, "cancel": cancel}
+        time.sleep(0.10)
+    return {"ok": False, "cancel": cancel, "reason": "MAKER_ORDER_STILL_OPEN_AFTER_CANCEL"}
+
+
+def _maker_first_entry(client: Any, candidate: dict[str, Any]) -> tuple[dict[str, Any], float]:
+    symbol = str(candidate["symbol"]).upper()
+    side = str(candidate["side"]).lower()
+    size = float(candidate["size"])
+    minimum = min_lot(symbol)
+
+    if abs(_position_size(client, symbol)) >= minimum:
+        raise RuntimeError(f"Maker-first requires no existing {symbol} position")
+
+    book = candidate.get("orderbook") if isinstance(candidate.get("orderbook"), dict) else {}
+    best_bid = float(book.get("best_bid") or 0.0)
+    best_ask = float(book.get("best_ask") or 0.0)
+    if best_bid <= 0 or best_ask <= 0 or best_ask < best_bid:
+        book = orderbook_profile(
+            symbol,
+            "LONG" if side == "buy" else "SHORT",
+        )
+        best_bid = float(book.get("best_bid") or 0.0)
+        best_ask = float(book.get("best_ask") or 0.0)
+    if best_bid <= 0 or best_ask <= 0:
+        raise RuntimeError("No usable orderbook for maker-first entry")
+
+    maker_price = round_price_to_tick(
+        symbol,
+        best_bid if side == "buy" else best_ask,
+        mode="down" if side == "buy" else "up",
+    )
+    cli_id = f"cm{int(time.time() * 1000)}"
+    wait_sec = _maker_wait_for_candidate(candidate)
+
+    # If the process loses connectivity while a passive entry is resting,
+    # Kraken's dead-man switch removes it. It is disabled again before the
+    # protective STOP/TP orders are placed.
+    try:
+        client.deadman(60)
+    except Exception:
+        pass
+
+    maker = place_order(
+        symbol,
+        side,
+        size,
+        reduce_only=False,
+        order_type="post",
+        limit_price=maker_price,
+        cli_ord_id=cli_id,
+        use_deadman=False,
+    )
+
+    if maker.get("submitted_live"):
+        deadline = time.time() + wait_sec
+        while time.time() < deadline:
+            actual = abs(_position_size(client, symbol))
+            if actual >= size - minimum * 0.5:
+                try:
+                    client.deadman(0)
+                except Exception:
+                    pass
+                return {
+                    "submitted_live": True,
+                    "entry_mode": "MAKER_FULL",
+                    "maker": maker,
+                    "maker_price": maker_price,
+                    "maker_wait_sec": wait_sec,
+                }, actual
+            time.sleep(MAKER_POLL_SEC)
+
+        verify = _cancel_entry_and_verify(client, cli_id)
+        if not verify.get("ok"):
+            raise RuntimeError(f"Maker entry could not be safely cancelled: {verify}")
+
+        actual = abs(_position_size(client, symbol))
+        try:
+            client.deadman(0)
+        except Exception:
+            pass
+
+        if actual >= minimum:
+            # Keep a partial passive fill rather than crossing the spread for
+            # the remainder. The risk manager protects the actual visible size.
+            return {
+                "submitted_live": True,
+                "entry_mode": "MAKER_PARTIAL",
+                "maker": maker,
+                "maker_cancel": verify,
+                "maker_price": maker_price,
+                "maker_wait_sec": wait_sec,
+                "requested_size": size,
+                "filled_size": actual,
+            }, actual
+    else:
+        try:
+            client.deadman(0)
+        except Exception:
+            pass
+
+    # No passive fill (or post-only was rejected because the book moved).
+    # Cross only after the passive order is confirmed absent.
+    if _cli_order_is_open(client, cli_id):
+        verify = _cancel_entry_and_verify(client, cli_id)
+        if not verify.get("ok"):
+            raise RuntimeError(f"Maker order still open before taker fallback: {verify}")
+
+    market = place_order(
+        symbol,
+        side,
+        size,
+        reduce_only=False,
+        order_type="mkt",
+        cli_ord_id=f"ce{int(time.time() * 1000)}",
+        use_deadman=False,
+    )
+    if not market.get("submitted_live"):
+        raise RuntimeError(f"Market fallback not submitted: {market}")
+
+    actual = 0.0
+    for _ in range(20):
+        time.sleep(0.25)
+        actual = abs(_position_size(client, symbol))
+        if actual >= minimum:
+            break
+
+    return {
+        "submitted_live": True,
+        "entry_mode": "MARKET_FALLBACK",
+        "maker": maker,
+        "maker_price": maker_price,
+        "maker_wait_sec": wait_sec,
+        "market": market,
+    }, actual
+
+
 def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     save_policy({
         "live_execution": False,
@@ -1192,24 +1355,27 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         order_preflight(symbol, side, size, reduce_only=False, client=client)
 
         save_policy({"live_execution": True})
-        entry = place_order(
-            symbol,
-            side,
-            size,
-            reduce_only=False,
-            order_type="mkt",
-            cli_ord_id=f"ce{int(time.time() * 1000)}",
-            use_deadman=False,
-        )
-        if not entry.get("submitted_live"):
-            raise RuntimeError(f"Entry not submitted: {entry}")
+        if MAKER_FIRST_ENABLED:
+            entry, actual_size = _maker_first_entry(client, candidate)
+        else:
+            entry = place_order(
+                symbol,
+                side,
+                size,
+                reduce_only=False,
+                order_type="mkt",
+                cli_ord_id=f"ce{int(time.time() * 1000)}",
+                use_deadman=False,
+            )
+            if not entry.get("submitted_live"):
+                raise RuntimeError(f"Entry not submitted: {entry}")
 
-        actual_size = 0.0
-        for _ in range(20):
-            time.sleep(0.35)
-            actual_size = abs(_position_size(client, symbol))
-            if actual_size >= min_lot(symbol):
-                break
+            actual_size = 0.0
+            for _ in range(20):
+                time.sleep(0.35)
+                actual_size = abs(_position_size(client, symbol))
+                if actual_size >= min_lot(symbol):
+                    break
         if actual_size < min_lot(symbol):
             raise RuntimeError("Entry was submitted but no open position became visible")
 
@@ -1246,6 +1412,7 @@ def execute_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             "reason": "FUTURES_CANARY_LIVE_WITH_PROTECTION",
             "candidate": candidate,
             "entry": entry,
+            "entry_mode": entry.get("entry_mode") if isinstance(entry, dict) else None,
             "stop": stop,
             "take_profit": take,
             "actual_order_submitted": True,
@@ -1378,6 +1545,8 @@ def selftest() -> dict[str, Any]:
         "live_quality_gate_positive": LIVE_MIN_QUALITY_SCORE >= 50.0,
         "maker_wait_positive": MAKER_WAIT_SEC > 0 and MAKER_POLL_SEC > 0,
         "v4_bonuses_nonnegative": V4_ORDERBOOK_BONUS >= 0 and V4_LEADER_BONUS >= 0,
+        "maker_first_enabled": MAKER_FIRST_ENABLED,
+        "maker_cancel_window_positive": MAKER_CANCEL_VERIFY_SEC > 0,
         "inverse_long_to_short": execution_signal_side("LONG") == ("SHORT" if INVERT_DIRECTION else "LONG"),
         "inverse_short_to_long": execution_signal_side("SHORT") == ("LONG" if INVERT_DIRECTION else "SHORT"),
     }
