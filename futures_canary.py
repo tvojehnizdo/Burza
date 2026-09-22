@@ -26,7 +26,7 @@ from futures_private import (
     save_policy,
 )
 
-INVERT_DIRECTION = True
+INVERT_DIRECTION = False
 
 MAX_UNIVERSE = 28
 UNIVERSE_PREFILTER = 48
