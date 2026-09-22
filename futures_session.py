@@ -22,6 +22,7 @@ from futures_autopilot import (
     _save_state,
 )
 from futures_canary import (
+    ROUND_TRIP_TAKER_COST_BPS,
     MAX_OPEN_POSITIONS,
     MAX_PORTFOLIO_NOTIONAL_PCT_EQUITY,
     MAX_PORTFOLIO_NOTIONAL_USD,
@@ -34,6 +35,7 @@ from futures_canary import (
 )
 from futures_pairs import scan_pairs
 from futures_private import save_policy
+from futures_shadow_learning import observe_plan as shadow_observe_plan, resolve_due as shadow_resolve_due
 
 SESSION_DURATION_SEC = 60 * 60
 SESSION_MAX_ENTRIES = 10
@@ -41,6 +43,10 @@ REENTRY_COOLDOWN_SEC = 300
 GLOBAL_ENTRY_BASE_SEC = 90
 GLOBAL_ENTRY_STRONG_SEC = 45
 GLOBAL_ENTRY_ELITE_SEC = 20
+LOSS_STREAK_PAUSE_AFTER = 2
+LOSS_STREAK_HALT_AFTER = 3
+LOSS_STREAK_PAUSE_SEC = 600
+SESSION_SOFT_LOSS_PCT = 1.5
 PAIR_LIVE_ENABLED = False
 
 
@@ -99,6 +105,56 @@ def _apply_exit_cooldowns(state: dict[str, Any], exits: list[dict[str, Any]], no
         symbol = str(row.get("symbol") or "").upper()
         if symbol:
             _set_symbol_cooldown(state, symbol, now_ms)
+
+
+def _apply_loss_feedback(
+    state: dict[str, Any],
+    exits: list[dict[str, Any]],
+    current_equity: float,
+    now_ms: int,
+) -> None:
+    streak = int(state.get("consecutive_net_losses") or 0)
+
+    for row in exits:
+        gross_bps = float(row.get("pnl_bps_before_close") or 0.0)
+        approx_net_bps = gross_bps - ROUND_TRIP_TAKER_COST_BPS
+        if approx_net_bps <= 0:
+            streak += 1
+        else:
+            streak = 0
+
+        _log({
+            "event": "SESSION_EXIT_FEEDBACK",
+            "symbol": row.get("symbol"),
+            "exit_reason": row.get("exit_reason"),
+            "gross_bps_before_close": gross_bps,
+            "approx_net_bps_after_modeled_cost": approx_net_bps,
+            "consecutive_net_losses": streak,
+        })
+
+        if streak >= LOSS_STREAK_HALT_AFTER:
+            state["entry_halt_reason"] = "LOSS_STREAK_CIRCUIT_BREAKER"
+        elif streak >= LOSS_STREAK_PAUSE_AFTER:
+            state["entry_pause_until_ts_ms"] = max(
+                int(state.get("entry_pause_until_ts_ms") or 0),
+                now_ms + LOSS_STREAK_PAUSE_SEC * 1000,
+            )
+
+    state["consecutive_net_losses"] = streak
+
+    start_equity = float(state.get("session_start_equity") or 0.0)
+    if start_equity > 0 and current_equity > 0:
+        drawdown_pct = max(0.0, (start_equity - current_equity) / start_equity * 100.0)
+        state["session_equity_drawdown_pct"] = drawdown_pct
+        if drawdown_pct >= SESSION_SOFT_LOSS_PCT:
+            state["entry_halt_reason"] = "SESSION_SOFT_LOSS_CIRCUIT_BREAKER"
+
+
+def _temporary_entry_pause(state: dict[str, Any], now_ms: int) -> tuple[bool, int]:
+    until = int(state.get("entry_pause_until_ts_ms") or 0)
+    if until > now_ms:
+        return True, max(0, (until - now_ms + 999) // 1000)
+    return False, 0
 
 
 def _rollback_pair_leg(client: Any, state: dict[str, Any], symbol: str, reason: str) -> dict[str, Any]:
@@ -229,6 +285,15 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
     if not allowed:
         return {"ok": True, "reason": reason}
 
+    paused, pause_remaining = _temporary_entry_pause(state, now_ms)
+    if paused:
+        return {
+            "ok": True,
+            "reason": "LOSS_STREAK_PAUSE",
+            "pause_remaining_sec": pause_remaining,
+            "consecutive_net_losses": int(state.get("consecutive_net_losses") or 0),
+        }
+
     pair_result = _try_pair_entry(state)
     if pair_result.get("reason") == "PAIR_AUTO_ENTRY_OPENED":
         return pair_result
@@ -240,6 +305,11 @@ def _try_entry(state: dict[str, Any]) -> dict[str, Any]:
         }
 
     plan = private_plan()
+    try:
+        shadow_observe_plan(plan)
+    except Exception as exc:
+        _log({"event": "SHADOW_OBSERVE_ERROR", "error": f"{type(exc).__name__}: {exc}"})
+
     if not plan.get("ready"):
         return {
             "ok": True,
@@ -330,6 +400,9 @@ def run_session() -> None:
     state["session_entry_count"] = 0
     state["symbol_cooldowns"] = {}
     state["last_any_entry_ts_ms"] = 0
+    state["consecutive_net_losses"] = 0
+    state["entry_pause_until_ts_ms"] = 0
+    state["session_equity_drawdown_pct"] = 0.0
     state.pop("entry_halt_reason", None)
     state["session_capital_usd"] = min(SESSION_CAPITAL_USD, float(initial["equity_usd"]))
     _save_state(state)
@@ -374,6 +447,22 @@ def run_session() -> None:
             now_ms = int(time.time() * 1000)
             _apply_exit_cooldowns(state, exits, now_ms)
             snap = _portfolio_snapshot(client)
+            _apply_loss_feedback(
+                state,
+                exits,
+                float(snap["equity_usd"]),
+                now_ms,
+            )
+
+            try:
+                shadow = shadow_resolve_due()
+                if int(shadow.get("resolved") or 0) > 0:
+                    _log({
+                        "event": "SHADOW_LEARNING_UPDATE",
+                        "resolved": shadow.get("resolved"),
+                    })
+            except Exception as exc:
+                _log({"event": "SHADOW_RESOLVE_ERROR", "error": f"{type(exc).__name__}: {exc}"})
 
             now_ms = int(time.time() * 1000)
             allowed, reason = _entry_allowed(now_ms, state)
@@ -450,6 +539,12 @@ def status() -> dict[str, Any]:
             "STRONG": GLOBAL_ENTRY_STRONG_SEC,
             "ELITE": GLOBAL_ENTRY_ELITE_SEC,
         },
+        "loss_brake": {
+            "pause_after_losses": LOSS_STREAK_PAUSE_AFTER,
+            "halt_after_losses": LOSS_STREAK_HALT_AFTER,
+            "pause_sec": LOSS_STREAK_PAUSE_SEC,
+            "soft_session_loss_pct": SESSION_SOFT_LOSS_PCT,
+        },
         "simple_pair_live_enabled": PAIR_LIVE_ENABLED,
         "state": state,
     }
@@ -465,6 +560,11 @@ def selftest() -> dict[str, Any]:
         "max_open_4": MAX_OPEN_POSITIONS == 4,
         "adaptive_pacing": (
             GLOBAL_ENTRY_ELITE_SEC < GLOBAL_ENTRY_STRONG_SEC < GLOBAL_ENTRY_BASE_SEC
+        ),
+        "loss_brake_ordered": (
+            0 < LOSS_STREAK_PAUSE_AFTER < LOSS_STREAK_HALT_AFTER
+            and LOSS_STREAK_PAUSE_SEC > 0
+            and SESSION_SOFT_LOSS_PCT > 0
         ),
         "window_open": _entry_allowed(
             now_ms,
