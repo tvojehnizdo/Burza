@@ -30,6 +30,8 @@ CONFIRM_TEXT = "TRANSFER AND SHORT ETH 80"
 REPORT_PATH = Path("reports/eth-longterm-short-latest.json")
 TRANSFER_WAIT_SEC = 35
 POSITION_WAIT_SEC = 10
+MARGIN_TRANSFER_BUFFER_PCT = 20.0
+MIN_USDC_TRANSFER = 1.0
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -68,6 +70,17 @@ def _ticker_mid(client: Any, symbol: str) -> float:
             except Exception:
                 continue
     raise RuntimeError(f"No usable ticker for {symbol}")
+
+
+def _spot_margin_state(client: KrakenPrivate) -> dict[str, float]:
+    tb = client.private("TradeBalance")
+    return {
+        "equity": _num(tb.get("e"), 0.0),
+        "used_margin": _num(tb.get("m"), 0.0),
+        "free_margin": max(0.0, _num(tb.get("mf"), 0.0)),
+        "margin_level": _num(tb.get("ml"), 0.0),
+        "unrealized_pnl": _num(tb.get("n"), 0.0),
+    }
 
 
 def _spot_usdc_available(client: KrakenPrivate) -> dict[str, float]:
@@ -119,6 +132,7 @@ def transfer_plan() -> dict[str, Any]:
     spot = _spot_client()
     spot_key = _spot_key_check(spot)
     spot_usdc = _spot_usdc_available(spot)
+    spot_margin = _spot_margin_state(spot)
     fut = _futures_clean_state()
     fut_equity = _num(fut.get("equity_usd"), 0.0)
 
@@ -128,12 +142,20 @@ def transfer_plan() -> dict[str, Any]:
     desired_futures_equity = total_pool * DEPLOY_PCT / 100.0
 
     transfer_needed = max(0.0, desired_futures_equity - fut_equity)
-    transfer_cap = max(0.0, available_usdc - reserve_target)
-    transfer_amount = _floor_usdc(min(transfer_needed, transfer_cap))
+    reserve_cap = max(0.0, available_usdc - reserve_target)
+
+    # Flexline and spot margin share the same available-margin pool. Kraken
+    # rejects transfers that would push free margin below zero, even when the
+    # USDC wallet balance itself is large. Keep 20% of free margin untouched.
+    margin_cap = spot_margin["free_margin"] * (1.0 - MARGIN_TRANSFER_BUFFER_PCT / 100.0)
+    transfer_amount = _floor_usdc(min(transfer_needed, reserve_cap, margin_cap))
+    if transfer_amount < MIN_USDC_TRANSFER:
+        transfer_amount = 0.0
 
     return {
         "spot_key": spot_key,
         "spot_usdc": spot_usdc,
+        "spot_margin": spot_margin,
         "futures_equity_usd": round(fut_equity, 6),
         "total_pool_usd_equivalent": round(total_pool, 6),
         "reserve_pct": RESERVE_PCT,
@@ -141,31 +163,61 @@ def transfer_plan() -> dict[str, Any]:
         "deploy_pct": DEPLOY_PCT,
         "desired_futures_equity_usd": round(desired_futures_equity, 6),
         "transfer_amount_usdc": transfer_amount,
+        "transfer_limited_by_free_margin": transfer_amount + 1e-9 < min(transfer_needed, reserve_cap),
+        "margin_transfer_buffer_pct": MARGIN_TRANSFER_BUFFER_PCT,
         "expected_spot_reserve_usdc": round(max(0.0, available_usdc - transfer_amount), 6),
     }
 
 
 def _wallet_transfer_usdc(amount: float) -> dict[str, Any]:
-    if amount <= 0:
-        return {"ok": True, "reason": "NO_TRANSFER_NEEDED", "amount_usdc": 0.0}
+    if amount < MIN_USDC_TRANSFER:
+        return {
+            "ok": True,
+            "reason": "NO_TRANSFER_CAPACITY_ABOVE_MINIMUM",
+            "amount_usdc": 0.0,
+        }
+
     spot = _spot_client()
-    result = spot.private(
-        "WalletTransfer",
-        {
-            "asset": "USDC",
-            "from": "Spot Wallet",
-            "to": "Futures Wallet",
-            "amount": f"{amount:.6f}",
-        },
-    )
-    refid = result.get("refid") if isinstance(result, dict) else None
-    if not refid:
-        raise RuntimeError(f"WalletTransfer returned no refid: {result}")
+    attempt = _floor_usdc(amount)
+    errors: list[str] = []
+
+    # A small safety backoff handles Kraken-side collateral haircuts/rounding.
+    # Failed WalletTransfer calls do not move funds.
+    while attempt >= MIN_USDC_TRANSFER:
+        try:
+            result = spot.private(
+                "WalletTransfer",
+                {
+                    "asset": "USDC",
+                    "from": "Spot Wallet",
+                    "to": "Futures Wallet",
+                    "amount": f"{attempt:.6f}",
+                },
+            )
+            refid = result.get("refid") if isinstance(result, dict) else None
+            if not refid:
+                raise RuntimeError(f"WalletTransfer returned no refid: {result}")
+            return {
+                "ok": True,
+                "reason": "WALLET_TRANSFER_SUBMITTED",
+                "requested_amount_usdc": amount,
+                "amount_usdc": attempt,
+                "refid": refid,
+                "backoff_errors": errors,
+            }
+        except Exception as exc:
+            msg = str(exc)
+            errors.append(msg)
+            if "Insufficient funds" not in msg and "EFunding" not in msg:
+                raise
+            attempt = _floor_usdc(attempt * 0.80)
+
     return {
         "ok": True,
-        "reason": "WALLET_TRANSFER_SUBMITTED",
-        "amount_usdc": amount,
-        "refid": refid,
+        "reason": "NO_TRANSFER_CAPACITY_ABOVE_MINIMUM_AFTER_BACKOFF",
+        "requested_amount_usdc": amount,
+        "amount_usdc": 0.0,
+        "backoff_errors": errors,
     }
 
 
@@ -454,10 +506,11 @@ def run_all(stop_pct: float, take_pct: float) -> dict[str, Any]:
     amount = float(before["transfer_amount_usdc"])
 
     transfer = _wallet_transfer_usdc(amount)
+    actual_transfer = float(transfer.get("amount_usdc") or 0.0)
     transfer_confirmation = _wait_for_transfer(
         float(before["spot_usdc"]["available"]),
         float(before["futures_equity_usd"]),
-        amount,
+        actual_transfer,
     )
 
     plan = build_post_transfer_plan(stop_pct, take_pct)
