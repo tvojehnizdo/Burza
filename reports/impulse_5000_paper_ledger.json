@@ -1,0 +1,49 @@
+{
+  "experiment": "Impulse 5000 PAPER/SIMULATED",
+  "currency": "CZK",
+  "starting_equity_czk": 5000,
+  "stop_equity_czk": 4500,
+  "last_verified_prior_state": {
+    "as_of_utc": "2026-09-21T10:08:12Z",
+    "equity_czk": 5045.59,
+    "cumulative_realized_pnl_czk": 45.59,
+    "closed_trades": 2,
+    "open_positions": [],
+    "cumulative_return_pct": 0.9118,
+    "current_drawdown_pct": 0,
+    "previously_reported_max_drawdown_pct_approx": 0.02,
+    "source": "prior Impulse 5000 PAPER report; distinct from V4 USD paper and SHADOW ledger"
+  },
+  "latest_iteration": {
+    "as_of_local": "2026-10-08T23:07:00+02:00",
+    "action": "NO_TRADE",
+    "reason": "No trustworthy live executable bid/ask and synchronized intraday OHLC/volume available to establish a positive net expected edge; public exchange ticker API access failed. News and delayed market prices do not justify simulated fills.",
+    "instruments_screened": [
+      "BTC/USD",
+      "ETH/USD",
+      "SOL/USD",
+      "XRP/USD"
+    ],
+    "strategies_considered": [
+      "microtrading",
+      "momentum",
+      "mean_reversion",
+      "breakout",
+      "spot_pairs_unleveraged"
+    ],
+    "simulated_entry_price": null,
+    "simulated_exit_price": null,
+    "position_size_czk": 0,
+    "estimated_execution_cost_czk": 0,
+    "realized_pnl_change_czk": 0,
+    "unrealized_pnl_czk": 0,
+    "equity_czk": 5045.59,
+    "cumulative_realized_pnl_czk": 45.59,
+    "cumulative_return_pct": 0.9118,
+    "current_drawdown_pct": 0,
+    "risk_stop_triggered": false,
+    "fee_assumption": "Bybit spot 0.1% per filled side unless account-specific verified; add actual spread and slippage; do not trade without live executable quotes.",
+    "limitations": "Portfolio continuity since 2026-09-21 not independently reconciled; no position was invented and prior verified state was preserved.",
+    "notify_user": false
+  }
+}
