@@ -15,21 +15,33 @@
     "source": "prior Impulse 5000 PAPER report; distinct from V4 USD paper and SHADOW ledger"
   },
   "latest_iteration": {
-    "as_of_local": "2026-10-23T19:30:25+02:00",
+    "as_of_local": "2026-10-24T05:48:09+02:00",
     "action": "NO_TRADE",
-    "reason": "Current indicative public market prices available, but exchange-specific synchronized executable bid/ask, order-book depth and fresh intraday OHLC/volume could not be verified; no demonstrated positive expected net edge across strategies after conservative costs.",
+    "reason": "Public spot reference prices and 24h changes were reviewed for momentum, mean reversion, breakout, microtrading and unleveraged spot relative-value. Direct venue-synchronized executable bid/ask, fresh OHLC/volume and order-book depth could not be verified. No positive net expected edge was demonstrated after conservative costs; no simulated fill created.",
     "instruments_screened": [
       "BTC/USDT",
       "ETH/USDT",
       "SOL/USDT",
       "XRP/USDT"
     ],
-    "reference_market": "Binance public price pages (indicative USD spot prices, not executable Bybit quotes)",
+    "reference_market": "Binance public indicative spot price pages, not executable Bybit order-book quotes",
     "reference_prices_usd_approx": {
-      "BTC": 81652.54,
-      "ETH": 2404,
-      "SOL": 104.06,
-      "XRP": 1.30642
+      "BTC": 80951.15,
+      "ETH": 2382.53,
+      "SOL": 102.63,
+      "XRP": 1.2897414
+    },
+    "reference_24h_change_pct_approx": {
+      "BTC": -0.21,
+      "ETH": -0.99,
+      "SOL": -1.49,
+      "XRP": -2.19
+    },
+    "reference_price_as_of_utc": {
+      "BTC": "2026-10-24T00:11:00Z",
+      "ETH": "2026-10-24T03:38:00Z",
+      "SOL": "2026-10-24T03:46:00Z",
+      "XRP": "2026-10-24T03:40:00Z"
     },
     "reference_urls": [
       "https://www.binance.com/en/price/bitcoin",
@@ -42,7 +54,7 @@
       "momentum",
       "mean_reversion",
       "breakout",
-      "spot_pairs_unleveraged"
+      "unleveraged_spot_pairs_or_hedge"
     ],
     "simulated_entry_price": null,
     "simulated_exit_price": null,
@@ -57,8 +69,8 @@
     "previous_reported_max_drawdown_pct_approx": 0.02,
     "risk_stop_equity_czk": 4500,
     "risk_stop_triggered": false,
-    "fee_assumption": "Bybit spot account fee unverified: assume 0.10% per filled side, plus 0.05% per side slippage and illustrative 0.02% total bid-ask spread, yielding 0.32% round trip before additional adverse selection. These are planning assumptions, not measured spreads.",
-    "limitations": "Last independently documented virtual equity is from 2026-09-21; intervening executions not independently reconciled. Separate V4/SHADOW balances are not merged. No simulated fill invented.",
+    "fee_assumption": "Bybit spot account rate not verified: 0.10% each executed side + assumed 0.05% slippage per side + illustrative 0.02% full bid-ask spread = 0.32% modeled round trip; not a measured quote. Example hypothetical 500 CZK round trip cost >=1.60 CZK.",
+    "limitations": "Last independently documented virtual equity is from 2026-09-21; intervening executions have not been independently reconciled. Distinct V4/SHADOW ledgers are excluded. No real or simulated orders placed.",
     "notify_user": false
   },
   "iteration_history": [
@@ -92,6 +104,53 @@
       "risk_stop_triggered": false,
       "fee_assumption": "Bybit spot 0.1% per filled side unless account-specific verified; add actual spread and slippage; do not trade without live executable quotes.",
       "limitations": "Portfolio continuity since 2026-09-21 not independently reconciled; no position was invented and prior verified state was preserved.",
+      "notify_user": false
+    },
+    {
+      "as_of_local": "2026-10-23T19:30:25+02:00",
+      "action": "NO_TRADE",
+      "reason": "Current indicative public market prices available, but exchange-specific synchronized executable bid/ask, order-book depth and fresh intraday OHLC/volume could not be verified; no demonstrated positive expected net edge across strategies after conservative costs.",
+      "instruments_screened": [
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT"
+      ],
+      "reference_market": "Binance public price pages (indicative USD spot prices, not executable Bybit quotes)",
+      "reference_prices_usd_approx": {
+        "BTC": 81652.54,
+        "ETH": 2404,
+        "SOL": 104.06,
+        "XRP": 1.30642
+      },
+      "reference_urls": [
+        "https://www.binance.com/en/price/bitcoin",
+        "https://www.binance.com/en/price/ethereum",
+        "https://www.binance.com/en/price/solana",
+        "https://www.binance.com/en/price/xrp"
+      ],
+      "strategies_considered": [
+        "microtrading",
+        "momentum",
+        "mean_reversion",
+        "breakout",
+        "spot_pairs_unleveraged"
+      ],
+      "simulated_entry_price": null,
+      "simulated_exit_price": null,
+      "position_size_czk": 0,
+      "estimated_execution_cost_czk": 0,
+      "realized_pnl_change_czk": 0,
+      "unrealized_pnl_czk": 0,
+      "equity_czk": 5045.59,
+      "cumulative_realized_pnl_czk": 45.59,
+      "cumulative_return_pct": 0.9118,
+      "current_drawdown_pct": 0,
+      "previous_reported_max_drawdown_pct_approx": 0.02,
+      "risk_stop_equity_czk": 4500,
+      "risk_stop_triggered": false,
+      "fee_assumption": "Bybit spot account fee unverified: assume 0.10% per filled side, plus 0.05% per side slippage and illustrative 0.02% total bid-ask spread, yielding 0.32% round trip before additional adverse selection. These are planning assumptions, not measured spreads.",
+      "limitations": "Last independently documented virtual equity is from 2026-09-21; intervening executions not independently reconciled. Separate V4/SHADOW balances are not merged. No simulated fill invented.",
       "notify_user": false
     }
   ]
